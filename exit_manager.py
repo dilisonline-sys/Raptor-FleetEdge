@@ -1,9 +1,28 @@
 """Module 5 — Exits, Stops, Trailing, Take-Profits."""
-import asyncio
 import time
 from dataclasses import dataclass, field
 from logger import log
 import config as cfg
+
+# imported lazily to avoid circular import
+def _push_tx(pos, close_price: float, reason: str):
+    try:
+        from instruction_server import push_transaction
+        pnl = (close_price - pos.avg_entry) * pos.qty * (1 if pos.side == "BUY" else -1)
+        push_transaction({
+            "side":   f"{pos.side} CLOSE",
+            "symbol": cfg.SYMBOL,
+            "qty":    round(pos.qty, 5),
+            "price":  round(close_price, 2),
+            "stop":   round(pos.stop, 2),
+            "tp1":    round(pos.tp1, 2),
+            "tp2":    round(pos.tp2, 2),
+            "risk":   round(pos.initial_risk, 2),
+            "pnl":    round(pnl, 2),
+            "status": reason,
+        })
+    except Exception:
+        pass
 
 
 @dataclass
@@ -69,6 +88,7 @@ class ExitManager:
                        (pos.side == "SELL" and current_price >= pos.stop)
             if hit_stop:
                 log("MODULE_5", "STOP_HIT", side=pos.side, stop=pos.stop, price=current_price)
+                _push_tx(pos, current_price, "STOP_HIT")
                 self.positions.remove(pos)
                 actions.append(f"CLOSE:{pos.side}:STOP")
                 continue
@@ -118,6 +138,7 @@ class ExitManager:
             max_hours  = cfg.MAX_TRADE_HOURS_FUTURES
             if hours_held > max_hours and r_multiple < 0.5:
                 log("MODULE_5", "TIME_EXIT_TRIGGERED", hours=round(hours_held, 1), r=round(r_multiple, 2))
+                _push_tx(pos, current_price, "TIME_EXIT")
                 self.positions.remove(pos)
                 actions.append(f"CLOSE:{pos.side}:TIME")
 
@@ -127,6 +148,7 @@ class ExitManager:
             price_below_ema9 = current_price < ind.get("ema9", current_price)
             if pos.side == "BUY" and rsi > cfg.RSI_EXIT_LONG and macd_cross_down and price_below_ema9:
                 log("MODULE_5", "SIGNAL_REVERSAL_EXIT", side="BUY", rsi=rsi)
+                _push_tx(pos, current_price, "SIGNAL_REVERSAL")
                 self.positions.remove(pos)
                 actions.append("CLOSE:BUY:SIGNAL_REVERSAL")
 

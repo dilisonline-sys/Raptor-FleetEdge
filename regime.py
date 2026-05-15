@@ -11,8 +11,9 @@ class RegimeClassifier:
         vol_ratio    = atr / price if price else 0
 
         # Volatile first — override everything
+        # 5% ATR/price: normal BTC chop (3-4%) stays tradeable; only flash-crash events blocked
         spike = (atr / atr_20bar_avg) > 2 if atr_20bar_avg else False
-        if vol_ratio > 0.03 or spike:
+        if vol_ratio > 0.05 or spike:
             regime = "VOLATILE"
         elif e9 > e21 > e50 or e9 < e21 < e50:
             regime = "TRENDING"

@@ -4,56 +4,110 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Identity ──────────────────────────────────────────────
-AGENT_NAME = "dipu"
-AGENT_VERSION = "1.0"
+AGENT_NAME    = os.environ.get("AGENT_NAME", "dipu")
+AGENT_VERSION = "1.1"
 
-# ── Exchange ──────────────────────────────────────────────
-BINANCE_API_KEY    = os.environ.get("BINANCE_API_KEY", "")
-BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
-USE_TESTNET        = os.environ.get("BINANCE_TESTNET", "true").lower() == "true"
+# ── Trading mode ─────────────────────────────────────────
+# Values: "testnet" | "demo" | "live"
+TRADING_MODE = os.environ.get("TRADING_MODE", "testnet").lower().strip()
+assert TRADING_MODE in ("testnet", "demo", "live"), \
+    f"TRADING_MODE must be testnet | demo | live, got: {TRADING_MODE}"
 
-SPOT_BASE_URL      = "https://testnet.binance.vision"    if USE_TESTNET else "https://api.binance.com"
-FUTURES_BASE_URL   = "https://testnet.binancefuture.com" if USE_TESTNET else "https://fapi.binance.com"
-SPOT_WS_URL        = "wss://testnet.binance.vision/ws"   if USE_TESTNET else "wss://stream.binance.com:9443/ws"
-FUTURES_WS_URL     = "wss://stream.binancefuture.com/ws" if USE_TESTNET else "wss://fstream.binance.com/ws"
+# ── Credentials per environment ───────────────────────────
+_KEYS = {
+    "testnet": (
+        os.environ.get("BINANCE_TESTNET_API_KEY",    ""),
+        os.environ.get("BINANCE_TESTNET_API_SECRET",  ""),
+    ),
+    "demo": (
+        os.environ.get("BINANCE_DEMO_API_KEY",       ""),
+        os.environ.get("BINANCE_DEMO_API_SECRET",     ""),
+    ),
+    "live": (
+        os.environ.get("BINANCE_LIVE_API_KEY",        ""),
+        os.environ.get("BINANCE_LIVE_API_SECRET",     ""),
+    ),
+}
 
-SYMBOL   = "BTCUSDT"
-INTERVAL = "1h"
+# Legacy single-key support (backwards compat with existing .env)
+_legacy_key    = os.environ.get("BINANCE_API_KEY",    "")
+_legacy_secret = os.environ.get("BINANCE_API_SECRET", "")
+
+BINANCE_API_KEY, BINANCE_API_SECRET = _KEYS[TRADING_MODE]
+if not BINANCE_API_KEY and _legacy_key:
+    BINANCE_API_KEY    = _legacy_key
+    BINANCE_API_SECRET = _legacy_secret
+
+# ── Endpoint URLs per environment ─────────────────────────
+_ENDPOINTS = {
+    "testnet": {
+        "spot_rest":     "https://testnet.binance.vision",
+        "futures_rest":  "https://testnet.binancefuture.com",
+        "spot_ws":       "wss://testnet.binance.vision/ws",
+        "futures_ws":    "wss://stream.binancefuture.com/ws",
+    },
+    "demo": {
+        "spot_rest":     "https://demo-api.binance.com",
+        "futures_rest":  "https://testnet.binancefuture.com",   # no demo futures yet
+        "spot_ws":       "wss://demo-stream.binance.com/ws",
+        "futures_ws":    "wss://stream.binancefuture.com/ws",
+    },
+    "live": {
+        "spot_rest":     "https://api.binance.com",
+        "futures_rest":  "https://fapi.binance.com",
+        "spot_ws":       "wss://stream.binance.com:9443/ws",
+        "futures_ws":    "wss://fstream.binance.com/ws",
+    },
+}
+
+_ep = _ENDPOINTS[TRADING_MODE]
+SPOT_BASE_URL    = _ep["spot_rest"]
+FUTURES_BASE_URL = _ep["futures_rest"]
+SPOT_WS_URL      = _ep["spot_ws"]
+FUTURES_WS_URL   = _ep["futures_ws"]
+
+# Convenience flags
+USE_TESTNET = TRADING_MODE == "testnet"
+USE_DEMO    = TRADING_MODE == "demo"
+USE_LIVE    = TRADING_MODE == "live"
+
+# ── Symbol & interval ─────────────────────────────────────
+SYMBOL       = "BTCUSDT"
+INTERVAL     = "1h"
 CANDLE_LIMIT = 200
 
 # ── Dipu's high-risk / high-reward parameters ─────────────
-# 20-year vet: pushes limits but never blows the account.
-RISK_PCT        = 0.02   # 2% per trade (vs conservative 1%)
-MAX_TRADE_PCT   = 0.08   # 8% equity max single trade
-MAX_EXPOSURE    = 0.30   # 30% total open exposure
-MAX_LEVERAGE    = 5      # up to 5× on futures
-DAILY_DD_LIMIT  = 0.07   # 7% daily halt threshold
-MONTHLY_DD_LIMIT= 0.20   # 20% monthly halt
-MAX_CONSEC_LOSS = 4      # halt after 4 consecutive losses
+RISK_PCT         = 0.02
+MAX_TRADE_PCT    = 0.08
+MAX_EXPOSURE     = 0.30
+MAX_LEVERAGE     = 5
+DAILY_DD_LIMIT   = 0.07
+MONTHLY_DD_LIMIT = 0.20
+MAX_CONSEC_LOSS  = 4
 
-# ── Entry Filters ─────────────────────────────────────────
-MAX_SPREAD_PCT  = 0.0020  # 0.20% — dipu tolerates wider spreads
+# ── Entry filters ─────────────────────────────────────────
+MAX_SPREAD_PCT  = 0.0020
 MIN_VOLUME_USDT = 5_000_000
-MAX_FUNDING     = 0.0015  # 0.15% per 8h
-MAX_SLIPPAGE    = 0.0015  # 0.15%
+MAX_FUNDING     = 0.0015
+MAX_SLIPPAGE    = 0.0015
 
 # ── Indicators ────────────────────────────────────────────
-ATR_PERIOD      = 14
-ATR_STOP_MULT   = 1.2    # tighter initial stop for better R:R
-ATR_TRAIL_MULT  = 0.8
-RSI_PERIOD      = 14
-RSI_EXIT_LONG   = 80
-RSI_EXIT_SHORT  = 20
+ATR_PERIOD     = 14
+ATR_STOP_MULT  = 1.2
+ATR_TRAIL_MULT = 0.8
+RSI_PERIOD     = 14
+RSI_EXIT_LONG  = 80
+RSI_EXIT_SHORT = 20
 
-# ── Take Profits (aggressive ladder) ─────────────────────
-TP1_R   = 2.0   # higher TP1 for better expectancy
+# ── Take profits ──────────────────────────────────────────
+TP1_R   = 2.0
 TP2_R   = 3.5
 TP3_R   = 6.0
 TP1_PCT = 0.33
 TP2_PCT = 0.33
 TP3_PCT = 0.34
 
-# ── Time Exits ────────────────────────────────────────────
+# ── Time exits ────────────────────────────────────────────
 MAX_TRADE_HOURS_SPOT    = 72
 MAX_TRADE_HOURS_FUTURES = 12
 
@@ -61,11 +115,8 @@ MAX_TRADE_HOURS_FUTURES = 12
 ALERT_WEBHOOK = os.environ.get("DIPU_ALERT_WEBHOOK", "")
 
 # ── Multi-agent instruction interface ─────────────────────
-# Dipu accepts trade signals from authorized external agents/bots.
-# The Binance account owner (login) is intentionally NOT in this list
-# — trade instructions must originate from authorized signal sources only.
 AUTHORIZED_AGENT_TOKENS = [
     t.strip() for t in os.environ.get("DIPU_AUTHORIZED_AGENT_TOKENS", "").split(",") if t.strip()
 ]
 INSTRUCTION_SERVER_HOST = "0.0.0.0"
-INSTRUCTION_SERVER_PORT = 7432
+INSTRUCTION_SERVER_PORT = int(os.environ.get("AGENT_PORT", 7432))
