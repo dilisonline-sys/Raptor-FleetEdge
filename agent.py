@@ -71,7 +71,11 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
         long_pullback  = ema_bull and rsi < 32   and price > e50
         short_pullback = ema_bear and rsi < 35   and macd < msig  # oversold in downtrend → short continuation
 
-        long_signal  = long_momentum  or long_pullback
+        # Reversal BUY: extreme oversold even in downtrend (BB lower touch + RSI < 25)
+        # Spot-safe: allows buying the dip when bearish EMA stack is at exhaustion
+        reversal_long = rsi < 25 and price <= bb_lo * 1.002
+
+        long_signal  = long_momentum  or long_pullback or reversal_long
         short_signal = short_momentum or short_pullback
 
     else:
@@ -336,6 +340,31 @@ async def main_loop():
             exit_actions = em.manage_open_positions(current_price, indicators)
             for act in exit_actions:
                 push_log(f"[EXIT] {act} @ {current_price:.4f}")
+                if act.startswith("CLOSE:"):
+                    # Full close — sell entire base asset balance on the exchange
+                    base_bal = await om.get_base_balance(active_symbol)
+                    if base_bal > 0:
+                        close_order = await om.submit("SELL", base_bal, tick, indicators,
+                                                      symbol=active_symbol)
+                        if close_order:
+                            push_log(f"[EXIT_EXECUTED] SELL {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
+                elif act.startswith("PARTIAL_CLOSE:BUY:TP1"):
+                    # Sell TP1_PCT of the position
+                    base_bal = await om.get_base_balance(active_symbol)
+                    sell_qty = base_bal * cfg.TP1_PCT / (1 - cfg.TP1_PCT + cfg.TP1_PCT)
+                    if sell_qty > 0:
+                        tp_order = await om.submit("SELL", sell_qty, tick, indicators,
+                                                   symbol=active_symbol)
+                        if tp_order:
+                            push_log(f"[TP1_EXECUTED] SELL {active_symbol} qty={round(sell_qty,6)} @ ~{current_price:.4f}")
+                elif act.startswith("PARTIAL_CLOSE:BUY:TP2"):
+                    base_bal = await om.get_base_balance(active_symbol)
+                    sell_qty = base_bal * cfg.TP2_PCT / (1 - cfg.TP2_PCT + cfg.TP2_PCT)
+                    if sell_qty > 0:
+                        tp_order = await om.submit("SELL", sell_qty, tick, indicators,
+                                                   symbol=active_symbol)
+                        if tp_order:
+                            push_log(f"[TP2_EXECUTED] SELL {active_symbol} qty={round(sell_qty,6)} @ ~{current_price:.4f}")
 
             # Update open position overlay
             if em.positions:
@@ -387,21 +416,22 @@ async def main_loop():
                 update_state(claude_thesis=thesis)
                 push_log(f"[CLAUDE] {thesis[:120]}")
 
-            if signal in ("BUY", "SELL") and not em.positions:
+            # Spot mode: only BUY can open a new position (no naked short selling)
+            if signal == "BUY" and not em.positions:
                 equity = await om.get_equity()
                 stop_d = indicators["atr14"] * cfg.ATR_STOP_MULT
                 qty    = PositionSizer.calculate(equity, current_price, stop_d, size_mult)
 
                 if qty:
-                    order = await om.submit(signal, qty, tick, indicators,
+                    order = await om.submit("BUY", qty, tick, indicators,
                                             symbol=active_symbol)
 
                     if order:
-                        push_log(f"[TRADE] {signal} {active_symbol} qty={round(qty,5)} @ ~{current_price:.4f}")
+                        push_log(f"[TRADE] BUY {active_symbol} qty={round(qty,5)} @ ~{current_price:.4f}")
                         pos = em.attach_exits(order, indicators, symbol=active_symbol)
                         if pos:
                             push_transaction({
-                                "side":   signal,
+                                "side":   "BUY",
                                 "symbol": active_symbol,
                                 "qty":    round(pos.qty, 5),
                                 "price":  pos.avg_entry,
