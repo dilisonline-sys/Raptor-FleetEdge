@@ -81,11 +81,13 @@ class OrderManager:
 
     async def _post_order(self, params: dict, retries: int = 3) -> dict | None:
         await self._ensure_session()
-        params["timestamp"]  = int(time.time() * 1000)
         params["recvWindow"] = 5000
-        params["signature"]  = _sign(params)
         delay = 0.5
         for attempt in range(retries):
+            # Refresh timestamp + signature on every attempt (prevents -1021 on retry)
+            params.pop("signature", None)
+            params["timestamp"] = int(time.time() * 1000)
+            params["signature"] = _sign(params)
             try:
                 async with self._session.post(
                     cfg.SPOT_BASE_URL + "/api/v3/order", params=params
