@@ -396,7 +396,8 @@ function filterLog() {
   const filtered = f ? allLogLines.filter(l => l.toLowerCase().includes(f)) : allLogLines;
   body.innerHTML = filtered.slice(-200).map(l => {
     let cls = 'info';
-    if (l.includes('ERROR') || l.includes('FAIL'))          cls = 'err';
+    if (l.includes('SELL_SKIPPED_NO_BALANCE') || l.includes('SIZING_CALC')) cls = 'err';
+    else if (l.includes('ERROR') || l.includes('FAIL'))     cls = 'err';
     else if (l.includes('HALT') || l.includes('WARN'))      cls = 'warn';
     else if (l.includes('FILLED') || l.includes('TRADE') || l.includes('TP') || l.includes('STOP_HIT')) cls = 'trade';
     else if (l.includes('SWITCH') || l.includes('SCAN'))    cls = 'switch';

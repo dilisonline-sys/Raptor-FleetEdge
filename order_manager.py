@@ -53,7 +53,11 @@ class OrderManager:
             log("MODULE_3", "LOT_STEP_ERROR", symbol=symbol, error=str(e))
         return 1.0  # safe fallback
 
-    async def get_equity(self) -> float:
+    async def get_equity(self, symbol: str | None = None, price: float | None = None) -> float:
+        """Total portfolio value in USDT.
+        Pass symbol+price to include the value of any held base asset
+        (e.g. BTC balance × current price), so a spot BUY doesn't look like a drawdown.
+        """
         await self._ensure_session()
         params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
         params["signature"] = _sign(params)
@@ -62,6 +66,11 @@ class OrderManager:
             data     = await r.json()
             balances = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in data["balances"]}
             usdt     = balances.get("USDT", 0.0)
+            # Include value of held base asset (e.g. BTC) so buying doesn't look like a loss
+            if symbol and price and price > 0:
+                base     = symbol.replace("USDT", "")
+                base_bal = balances.get(base, 0.0)
+                usdt    += base_bal * price
             log("MODULE_2", "EQUITY_FETCH", usdt=round(usdt, 2))
             return usdt
 
