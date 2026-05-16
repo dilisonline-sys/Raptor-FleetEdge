@@ -11,7 +11,7 @@ def _push_tx(pos, close_price: float, reason: str):
         pnl = (close_price - pos.avg_entry) * pos.qty * (1 if pos.side == "BUY" else -1)
         push_transaction({
             "side":   f"{pos.side} CLOSE",
-            "symbol": cfg.SYMBOL,
+            "symbol": getattr(pos, "symbol", cfg.SYMBOL),
             "qty":    round(pos.qty, 5),
             "price":  round(close_price, 2),
             "stop":   round(pos.stop, 2),
@@ -35,6 +35,7 @@ class Position:
     tp2:              float
     tp3:              float
     initial_risk:     float
+    symbol:           str   = ""
     entry_ts:         float = field(default_factory=time.time)
     highest_price:    float = 0.0
     lowest_price:     float = float("inf")
@@ -47,7 +48,7 @@ class ExitManager:
     def __init__(self):
         self.positions: list[Position] = []
 
-    def attach_exits(self, order: dict, ind: dict) -> Position | None:
+    def attach_exits(self, order: dict, ind: dict, symbol: str = "") -> Position | None:
         if not order or order.get("status") not in ("FILLED", "PARTIALLY_FILLED"):
             return None
         side       = order["side"]
@@ -63,6 +64,7 @@ class ExitManager:
 
         pos = Position(side=side, avg_entry=entry, qty=qty, stop=stop,
                        tp1=tp1, tp2=tp2, tp3=tp3, initial_risk=risk,
+                       symbol=symbol or cfg.SYMBOL,
                        highest_price=entry, lowest_price=entry)
         self.positions.append(pos)
         log("MODULE_5", "EXITS_ATTACHED", side=side, entry=entry, stop=round(stop, 2),

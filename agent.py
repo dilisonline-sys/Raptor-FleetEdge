@@ -75,21 +75,19 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
         short_signal = short_momentum or short_pullback
 
     else:
-        # RANGING: tighter band — mean reversion off Bollinger bands
-        long_signal = (
-            e9 > e21 > e50 and 28 < rsi < 65 and macd > msig and price > e21
-        )
-        short_signal = (
-            e9 < e21 < e50 and 35 < rsi < 72 and macd < msig and price < e21
-        )
+        # RANGING: e9/e21 relationship is enough (full stack too rare in a range)
+        long_signal  = e9 > e21 and 28 < rsi < 65 and macd > msig
+        short_signal = e9 < e21 and 35 < rsi < 72 and macd < msig
 
     if regime == "RANGING":
+        # BB touch overrides (higher-conviction entry at range extremes)
         if price <= bb_lo * 1.002 and rsi < 38:
-            long_signal = True
+            long_signal  = True
+            short_signal = False
         elif price >= bb_hi * 0.998 and rsi > 62:
             short_signal = True
-        else:
-            return "NONE"
+            long_signal  = False
+        # no else-return-NONE: let EMA/MACD conditions above still fire
 
     if long_signal:  return "BUY"
     if short_signal: return "SELL"
@@ -400,7 +398,7 @@ async def main_loop():
 
                     if order:
                         push_log(f"[TRADE] {signal} {active_symbol} qty={round(qty,5)} @ ~{current_price:.4f}")
-                        pos = em.attach_exits(order, indicators)
+                        pos = em.attach_exits(order, indicators, symbol=active_symbol)
                         if pos:
                             push_transaction({
                                 "side":   signal,
