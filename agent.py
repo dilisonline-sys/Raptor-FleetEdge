@@ -495,7 +495,7 @@ async def main_loop():
 
             # ── Position heartbeat (displayed every cycle in live log) ────
             if em.positions:
-                pos = list(em.positions.values())[0]
+                pos = em.positions[0]
                 pnl_pct = (current_price - pos.avg_entry) / pos.avg_entry * 100
                 push_log(
                     f"[STATUS] {active_symbol} | price={current_price:.2f} | entry={pos.avg_entry:.2f} "
