@@ -239,16 +239,20 @@ async def main_loop():
                 gate_fail_streak += 1
                 push_log(f"[QUALITY_GATE] {active_symbol} — gate fail #{gate_fail_streak}, sitting out")
                 if gate_fail_streak >= GATE_FAIL_SWITCH_AFTER and not em.positions:
-                    push_log(f"[QUALITY_GATE] {gate_fail_streak} straight fails — forcing coin switch")
-                    log("AGENT", "GATE_FAIL_SWITCH", symbol=active_symbol, streak=gate_fail_streak)
-                    new_symbol = await scanner.scan(exclude={active_symbol}, force=True)
-                    if new_symbol != active_symbol:
-                        await md.close()
-                        active_symbol = new_symbol
-                        md = MarketData(active_symbol, cfg.INTERVAL)
-                        await md.connect()
-                        update_state(symbol=active_symbol)
-                        push_log(f"[SWITCH] → {active_symbol} (quality gate escape)")
+                    coin_mode = _state.get("coin_mode", "auto")
+                    if coin_mode == "auto":
+                        push_log(f"[QUALITY_GATE] {gate_fail_streak} straight fails — forcing coin switch")
+                        log("AGENT", "GATE_FAIL_SWITCH", symbol=active_symbol, streak=gate_fail_streak)
+                        new_symbol = await scanner.scan(exclude={active_symbol}, force=True)
+                        if new_symbol != active_symbol:
+                            await md.close()
+                            active_symbol = new_symbol
+                            md = MarketData(active_symbol, cfg.INTERVAL)
+                            await md.connect()
+                            update_state(symbol=active_symbol)
+                            push_log(f"[SWITCH] → {active_symbol} (quality gate escape)")
+                    else:
+                        push_log(f"[QUALITY_GATE] {gate_fail_streak} straight fails — manual mode, holding {active_symbol}")
                     gate_fail_streak = 0
                 await asyncio.sleep(30)
                 continue
@@ -300,22 +304,26 @@ async def main_loop():
                 elapsed = _time.time() - volatile_since
                 if elapsed >= VOLATILE_ESCAPE_SECS:
                     mins = int(elapsed // 60)
-                    push_log(f"[VOLATILE_ESCAPE] {active_symbol} volatile for {mins}m — forcing coin switch")
-                    log("AGENT", "VOLATILE_ESCAPE", symbol=active_symbol, minutes=mins)
-                    if em.positions:
-                        await om.cancel_all()
-                        em.positions.clear()
-                        push_log(f"[VOLATILE_ESCAPE] closed open position to switch coin")
-                    new_symbol = await scanner.scan(exclude={active_symbol}, force=True)
-                    if new_symbol != active_symbol:
-                        push_log(f"[SWITCH] {active_symbol} → {new_symbol} (volatile escape)")
-                        log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol,
-                            reason="volatile_escape")
-                        await md.close()
-                        active_symbol = new_symbol
-                        md = MarketData(active_symbol, cfg.INTERVAL)
-                        await md.connect()
-                        update_state(symbol=active_symbol)
+                    coin_mode = _state.get("coin_mode", "auto")
+                    if coin_mode == "auto":
+                        push_log(f"[VOLATILE_ESCAPE] {active_symbol} volatile for {mins}m — forcing coin switch")
+                        log("AGENT", "VOLATILE_ESCAPE", symbol=active_symbol, minutes=mins)
+                        if em.positions:
+                            await om.cancel_all()
+                            em.positions.clear()
+                            push_log(f"[VOLATILE_ESCAPE] closed open position to switch coin")
+                        new_symbol = await scanner.scan(exclude={active_symbol}, force=True)
+                        if new_symbol != active_symbol:
+                            push_log(f"[SWITCH] {active_symbol} → {new_symbol} (volatile escape)")
+                            log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol,
+                                reason="volatile_escape")
+                            await md.close()
+                            active_symbol = new_symbol
+                            md = MarketData(active_symbol, cfg.INTERVAL)
+                            await md.connect()
+                            update_state(symbol=active_symbol)
+                    else:
+                        push_log(f"[VOLATILE_ESCAPE] {active_symbol} volatile for {mins}m — manual mode, holding")
                     volatile_since = 0.0
                     await asyncio.sleep(60)
                     continue
@@ -351,8 +359,9 @@ async def main_loop():
                 _ranked_idx        = 0
             else:
                 none_signal_streak += 1
-                # Rotate to the next best ranked coin when no setup found repeatedly
-                if none_signal_streak >= NONE_SIGNAL_ROTATE and not em.positions and scanner.ranked:
+                # Rotate to the next best ranked coin when no setup found repeatedly (auto mode only)
+                coin_mode = _state.get("coin_mode", "auto")
+                if coin_mode == "auto" and none_signal_streak >= NONE_SIGNAL_ROTATE and not em.positions and scanner.ranked:
                     _ranked_idx = (_ranked_idx + 1) % len(scanner.ranked)
                     next_sym    = scanner.ranked[_ranked_idx]["symbol"]
                     if next_sym != active_symbol:
