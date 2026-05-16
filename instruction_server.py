@@ -501,7 +501,9 @@ def update_state(**kwargs):
 
 
 def push_log(entry: str):
-    _state["last_log"].append(entry)
+    import datetime as _dt
+    ts = _dt.datetime.now().strftime("%H:%M:%S")
+    _state["last_log"].append(f"{ts} {entry}")
     if len(_state["last_log"]) > 200:
         _state["last_log"].pop(0)
 
