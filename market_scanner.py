@@ -36,7 +36,7 @@ class MarketScanner:
 
     async def _get(self, path: str, params: dict = None) -> list | dict:
         await self._ensure_session()
-        async with self._session.get(cfg.SPOT_BASE_URL + path, params=params or {}) as r:
+        async with self._session.get(cfg.PUBLIC_DATA_URL + path, params=params or {}) as r:
             r.raise_for_status()
             return await r.json()
 

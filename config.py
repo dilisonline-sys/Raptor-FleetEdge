@@ -66,6 +66,12 @@ FUTURES_BASE_URL = _ep["futures_rest"]
 SPOT_WS_URL      = _ep["spot_ws"]
 FUTURES_WS_URL   = _ep["futures_ws"]
 
+# Public market data always fetched from live Binance API.
+# Demo and testnet simulate orders at real prices — their public endpoints
+# may return limited or stale data, so all unauthenticated data reads
+# (klines, ticker, depth, scanner) come from the real exchange.
+PUBLIC_DATA_URL = "https://api.binance.com"
+
 # Convenience flags
 USE_TESTNET = TRADING_MODE == "testnet"
 USE_DEMO    = TRADING_MODE == "demo"

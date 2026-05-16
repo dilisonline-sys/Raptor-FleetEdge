@@ -31,7 +31,7 @@ class MarketData:
 
     async def _ws_ticker_loop(self):
         sym  = self.symbol.lower()
-        url  = f"{cfg.SPOT_WS_URL}/{sym}@ticker"
+        url  = f"wss://stream.binance.com:9443/ws/{sym}@ticker"
         fail = 0
         while fail < 4:
             try:
@@ -62,7 +62,7 @@ class MarketData:
 
     async def _ws_book_loop(self):
         sym  = self.symbol.lower()
-        url  = f"{cfg.SPOT_WS_URL}/{sym}@bookTicker"
+        url  = f"wss://stream.binance.com:9443/ws/{sym}@bookTicker"
         fail = 0
         while fail < 4:
             try:
@@ -115,7 +115,7 @@ class MarketData:
         if self._ws_ticker is not None:
             return self._ws_ticker
         # REST fallback (first cycle before WS warms up)
-        data = await self._get(cfg.SPOT_BASE_URL, "/api/v3/ticker/24hr",
+        data = await self._get(cfg.PUBLIC_DATA_URL, "/api/v3/ticker/24hr",
                                {"symbol": self.symbol})
         return {
             "price":       float(data["lastPrice"]),
@@ -125,7 +125,7 @@ class MarketData:
 
     async def get_orderbook(self) -> dict:
         # Always REST for depth — need 10-level book to compute imbalance
-        data  = await self._get(cfg.SPOT_BASE_URL, "/api/v3/depth",
+        data  = await self._get(cfg.PUBLIC_DATA_URL, "/api/v3/depth",
                                 {"symbol": self.symbol, "limit": 20})
         bids  = [(float(p), float(q)) for p, q in data["bids"]]
         asks  = [(float(p), float(q)) for p, q in data["asks"]]
@@ -145,7 +145,7 @@ class MarketData:
         return result
 
     async def get_klines(self) -> pd.DataFrame:
-        data = await self._get(cfg.SPOT_BASE_URL, "/api/v3/klines",
+        data = await self._get(cfg.PUBLIC_DATA_URL, "/api/v3/klines",
                                {"symbol": self.symbol, "interval": self.interval,
                                 "limit": cfg.CANDLE_LIMIT})
         df = pd.DataFrame(data, columns=[

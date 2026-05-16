@@ -208,15 +208,13 @@ async def main_loop():
                 await asyncio.sleep(60)
                 continue
 
-            # ── Dynamic symbol selection (no open position) ───────
-            if not em.positions:
-                # Always run scanner to keep top_coins list fresh
+            # ── Dynamic symbol selection (no open position, auto mode only) ──
+            coin_mode = _state.get("coin_mode", "auto")
+            if not em.positions and coin_mode == "auto":
                 new_symbol = await scanner.scan()
                 top5 = [r["symbol"] for r in scanner.ranked[:5]]
                 update_state(top_coins=top5)
-                # Only switch coin if in auto mode
-                coin_mode = _state.get("coin_mode", "auto")
-                if coin_mode == "auto" and new_symbol != active_symbol:
+                if new_symbol != active_symbol:
                     push_log(f"[SWITCH] {active_symbol} → {new_symbol} | top5={top5}")
                     log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol, top5=top5)
                     await md.close()
@@ -224,10 +222,10 @@ async def main_loop():
                     md = MarketData(active_symbol, cfg.INTERVAL)
                     await md.connect()
                     update_state(symbol=active_symbol, top_coins=top5)
-                elif coin_mode != "auto":
-                    push_log(f"[COIN_SELECT] Manual mode — holding {active_symbol} | top5={top5}")
                 else:
                     push_log(f"[SCAN] staying on {active_symbol} | top5={top5}")
+            elif not em.positions:
+                push_log(f"[COIN_SELECT] Manual mode — holding {active_symbol}")
 
             # ── Module 1: Market Data ─────────────────────────────
             try:
