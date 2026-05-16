@@ -88,6 +88,18 @@ class OrderManager:
                     return float(b["free"])
         return 0.0
 
+    async def get_balances_raw(self, symbol: str) -> tuple[float, float]:
+        """Returns (usdt_total, base_total) — free + locked. Single API call."""
+        await self._ensure_session()
+        base = symbol.replace("USDT", "")
+        params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
+        params["signature"] = _sign(params)
+        async with self._session.get(cfg.SPOT_BASE_URL + "/api/v3/account", params=params) as r:
+            r.raise_for_status()
+            data = await r.json()
+            bals = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in data["balances"]}
+            return bals.get("USDT", 0.0), bals.get(base, 0.0)
+
     async def _post_order(self, params: dict, retries: int = 3) -> dict | None:
         await self._ensure_session()
         params["recvWindow"] = 5000

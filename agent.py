@@ -119,7 +119,7 @@ async def main_loop():
     risk.update_metrics(equity)
 
     async def _price_pusher():
-        """Push live WS ticker price to dashboard state every 2 s for chart live-tick."""
+        """Push live WS ticker price to dashboard state every 2s for chart live-tick."""
         while True:
             try:
                 if md._ws_ticker and md._ws_ticker.get("price", 0) > 0:
@@ -127,6 +127,28 @@ async def main_loop():
             except Exception:
                 pass
             await asyncio.sleep(2)
+
+    async def _equity_pusher():
+        """Recompute displayed equity every 5s using live WS price + cached Binance balances.
+        Balances are re-fetched from the API every 30s; valuation uses the WS tick price."""
+        _usdt      = 0.0
+        _base      = 0.0
+        _last_fetch = 0.0
+        import time as _time
+        while True:
+            try:
+                now   = _time.time()
+                price = (md._ws_ticker or {}).get("price", 0)
+                # Refresh raw balances from Binance API every 30s
+                if now - _last_fetch >= 30:
+                    _usdt, _base = await om.get_balances_raw(active_symbol)
+                    _last_fetch  = now
+                # Revalue with live WS price
+                if price > 0:
+                    update_state(equity=round(_usdt + _base * price, 2))
+            except Exception:
+                pass
+            await asyncio.sleep(5)
 
     # Demo always starts on BTC; other modes scan for best coin
     if cfg.USE_DEMO:
@@ -137,6 +159,7 @@ async def main_loop():
     md = MarketData(active_symbol, cfg.INTERVAL)
     await md.connect()
     asyncio.create_task(_price_pusher())
+    asyncio.create_task(_equity_pusher())
 
     pending_override:    str | None = None
     volatile_since:      float      = 0.0   # when current coin first entered VOLATILE
