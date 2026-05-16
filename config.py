@@ -76,14 +76,15 @@ SYMBOL       = "BTCUSDT"
 INTERVAL     = "1h"
 CANDLE_LIMIT = 200
 
-# ── Dipu's high-risk / high-reward parameters ─────────────
-RISK_PCT         = 0.02
-MAX_TRADE_PCT    = 0.08
-MAX_EXPOSURE     = 0.30
-MAX_LEVERAGE     = 5
-DAILY_DD_LIMIT   = 0.07
-MONTHLY_DD_LIMIT = 0.20
-MAX_CONSEC_LOSS  = 4
+# ── Per-mode risk parameters (testnet == demo; live can differ) ──
+_RISK = {
+    #              risk_pct  max_trade  exposure  leverage  daily_dd  monthly_dd  consec_loss
+    "testnet": (   0.02,     0.08,      0.30,     5,        0.07,     0.20,       4 ),
+    "demo":    (   0.02,     0.08,      0.30,     5,        0.07,     0.20,       4 ),
+    "live":    (   0.02,     0.08,      0.30,     5,        0.07,     0.20,       4 ),
+}
+(RISK_PCT, MAX_TRADE_PCT, MAX_EXPOSURE, MAX_LEVERAGE,
+ DAILY_DD_LIMIT, MONTHLY_DD_LIMIT, MAX_CONSEC_LOSS) = _RISK[TRADING_MODE]
 
 # ── Entry filters ─────────────────────────────────────────
 MAX_SPREAD_PCT  = 0.0020
