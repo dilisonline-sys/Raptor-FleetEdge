@@ -87,7 +87,7 @@ _RISK = {
     #              risk_pct  max_trade  exposure  leverage  daily_dd  monthly_dd  consec_loss
     "testnet": (   0.02,     0.08,      0.30,     5,        0.07,     0.20,       4 ),
     "demo":    (   0.02,     0.08,      0.30,     5,        0.07,     0.20,       4 ),
-    "live":    (   0.02,     0.08,      0.30,     5,        0.07,     0.20,       4 ),
+    "live":    (   0.50,     0.80,      0.90,     5,        0.07,     0.20,       4 ),
 }
 (RISK_PCT, MAX_TRADE_PCT, MAX_EXPOSURE, MAX_LEVERAGE,
  DAILY_DD_LIMIT, MONTHLY_DD_LIMIT, MAX_CONSEC_LOSS) = _RISK[TRADING_MODE]
