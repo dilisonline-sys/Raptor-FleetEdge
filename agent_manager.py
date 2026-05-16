@@ -68,12 +68,13 @@ def _agent_status(name: str) -> str:
     return "stopped"
 
 
-def _spawn(name: str, mode: str, port: int) -> dict | None:
+def _spawn(name: str, mode: str, port: int, symbol: str = "BTCUSDT") -> dict | None:
     log_file = f"/tmp/dipu_{name}.log"
     env = {**os.environ,
-           "TRADING_MODE": mode,
-           "AGENT_NAME":   name,
-           "AGENT_PORT":   str(port)}
+           "TRADING_MODE":  mode,
+           "AGENT_NAME":    name,
+           "AGENT_PORT":    str(port),
+           "AGENT_SYMBOL":  symbol.upper()}
     try:
         proc = subprocess.Popen(
             [sys.executable, str(AGENT_SCRIPT)],
@@ -81,7 +82,7 @@ def _spawn(name: str, mode: str, port: int) -> dict | None:
             stdout=open(log_file, "w"),
             stderr=subprocess.STDOUT,
         )
-        info = {"pid": proc.pid, "port": port, "mode": mode,
+        info = {"pid": proc.pid, "port": port, "mode": mode, "symbol": symbol.upper(),
                 "started_at": time.time(), "log_file": log_file, "name": name}
         _agents[name] = info
         _save_state()
@@ -119,12 +120,12 @@ MANAGER_HTML = r"""<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#080808;color:#ddd;font-family:'Courier New',monospace;padding:28px}
 h1{color:#00e5ff;font-size:1.5rem;margin-bottom:4px}
-.sub{color:#444;font-size:.78rem;margin-bottom:28px}
-h2{color:#333;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;margin:24px 0 10px}
+.sub{color:#fff;font-size:.78rem;margin-bottom:28px}
+h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;margin:24px 0 10px}
 /* spawn form */
 .spawn-form{background:#0e0e0e;border:1px solid #1e1e1e;border-radius:8px;padding:20px;margin-bottom:28px;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
 .field{display:flex;flex-direction:column;gap:5px}
-.field label{font-size:.68rem;color:#555;text-transform:uppercase;letter-spacing:.08em}
+.field label{font-size:.68rem;color:#fff;text-transform:uppercase;letter-spacing:.08em}
 .field input,.field select{background:#0a0a0a;border:1px solid #222;color:#ddd;padding:7px 10px;border-radius:5px;font-family:inherit;font-size:.8rem;min-width:160px}
 .btn{padding:8px 18px;border-radius:5px;border:none;cursor:pointer;font-family:inherit;font-size:.78rem;font-weight:bold;transition:.15s}
 .btn-spawn{background:#00e5ff;color:#000}.btn-spawn:hover{background:#00b8cc}
@@ -140,12 +141,12 @@ h2{color:#333;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 .badge{display:inline-block;padding:2px 9px;border-radius:4px;font-size:.65rem;font-weight:bold}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
 .dot.on{background:#00e676}.dot.off{background:#555}
-.meta{font-size:.7rem;color:#444;margin-bottom:14px;line-height:1.8}
-.meta span{color:#777}
-.api-label{font-size:.68rem;color:#aaa;background:#111;border:1px solid #1e1e1e;border-radius:4px;padding:3px 8px;display:inline-block;margin-bottom:10px;font-family:monospace}
+.meta{font-size:.7rem;color:#fff;margin-bottom:14px;line-height:1.8}
+.meta span{color:#fff}
+.api-label{font-size:.68rem;color:#fff;background:#111;border:1px solid #1e1e1e;border-radius:4px;padding:3px 8px;display:inline-block;margin-bottom:10px;font-family:monospace}
 .card-actions{display:flex;gap:8px;flex-wrap:wrap}
-.status-bar{margin-top:14px;font-size:.65rem;color:#333;border-top:1px solid #141414;padding-top:10px}
-.no-agents{color:#333;font-size:.8rem;padding:20px 0}
+.status-bar{margin-top:14px;font-size:.65rem;color:#fff;border-top:1px solid #141414;padding-top:10px}
+.no-agents{color:#fff;font-size:.8rem;padding:20px 0}
 </style>
 </head>
 <body>
@@ -165,6 +166,16 @@ h2{color:#333;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
       <option value="demo" selected>Demo  (demo-api.binance.com)</option>
       <option value="live">⚠ Live  (api.binance.com)</option>
     </select>
+  </div>
+  <div class="field">
+    <label>Starting coin</label>
+    <input id="f-coin" type="text" list="coin-list" placeholder="BTCUSDT" value="BTCUSDT" style="min-width:120px">
+    <datalist id="coin-list">
+      <option value="BTCUSDT"><option value="ETHUSDT"><option value="BNBUSDT">
+      <option value="SOLUSDT"><option value="XRPUSDT"><option value="ADAUSDT">
+      <option value="DOGEUSDT"><option value="AVAXUSDT"><option value="DOTUSDT">
+      <option value="LINKUSDT"><option value="LTCUSDT"><option value="MATICUSDT">
+    </datalist>
   </div>
   <div class="field">
     <label>Dashboard port</label>
@@ -212,12 +223,13 @@ async function loadAgents() {
       <div class="meta">
         Port: <span>:${a.port}</span> &nbsp;|&nbsp;
         PID: <span>${a.pid || '—'}</span> &nbsp;|&nbsp;
+        Coin: <span>${a.symbol || 'AUTO'}</span> &nbsp;|&nbsp;
         Uptime: <span>${upStr}</span>
       </div>
       <div class="card-actions">
         ${alive
           ? `<button class="btn btn-stop" onclick="stopAgent('${a.name}')">&#9646;&#9646; Stop</button>`
-          : `<button class="btn btn-spawn" onclick="startAgent('${a.name}','${a.mode}',${a.port})">&#9654; Start</button>`
+          : `<button class="btn btn-spawn" onclick="startAgent('${a.name}','${a.mode}',${a.port},'${a.symbol||'BTCUSDT'}')">&#9654; Start</button>`
         }
         <button class="btn btn-open" onclick="window.open('/agent/${a.name}/','_blank')">
           &#9654; Open Dashboard
@@ -229,16 +241,17 @@ async function loadAgents() {
 }
 
 async function spawnAgent() {
-  const name = document.getElementById('f-name').value.trim();
-  const mode = document.getElementById('f-mode').value;
-  const port = parseInt(document.getElementById('f-port').value);
+  const name   = document.getElementById('f-name').value.trim();
+  const mode   = document.getElementById('f-mode').value;
+  const port   = parseInt(document.getElementById('f-port').value);
+  const symbol = (document.getElementById('f-coin').value.trim().toUpperCase() || 'BTCUSDT');
   if (!name) { alert('Enter an agent name'); return; }
   const msg = document.getElementById('spawn-msg');
   msg.textContent = 'Spawning…';
   const r = await fetch('/api/spawn', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({name, mode, port}),
+    body: JSON.stringify({name, mode, port, symbol}),
   });
   const d = await r.json();
   msg.textContent = d.error ? '✗ ' + d.error : `✓ ${name} started on :${port}`;
@@ -256,11 +269,11 @@ async function stopAgent(name) {
   loadAgents();
 }
 
-async function startAgent(name, mode, port) {
+async function startAgent(name, mode, port, symbol) {
   const r = await fetch('/api/spawn', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({name, mode, port}),
+    body: JSON.stringify({name, mode, port, symbol: symbol || 'BTCUSDT'}),
   });
   loadAgents();
 }
@@ -294,10 +307,11 @@ class AgentManager:
         return web.json_response(result)
 
     async def _spawn(self, request: web.Request):
-        body = await request.json()
-        name = body.get("name", "").strip()
-        mode = body.get("mode", "testnet")
-        port = int(body.get("port", MODE_META.get(mode, (7432,))[0]))
+        body   = await request.json()
+        name   = body.get("name", "").strip()
+        mode   = body.get("mode", "testnet")
+        port   = int(body.get("port", MODE_META.get(mode, (7432,))[0]))
+        symbol = body.get("symbol", "BTCUSDT").upper().strip() or "BTCUSDT"
 
         if not name:
             return web.json_response({"error": "name required"}, status=400)
@@ -306,7 +320,7 @@ class AgentManager:
         if name in _agents and _pid_alive(_agents[name].get("pid", 0)):
             return web.json_response({"error": f"{name} already running"}, status=409)
 
-        info = _spawn(name, mode, port)
+        info = _spawn(name, mode, port, symbol)
         if not info:
             return web.json_response({"error": "failed to spawn"}, status=500)
         return web.json_response({"ok": True, **info})

@@ -10,6 +10,7 @@ Dynamic symbol selection: dipu scans all USDT pairs every 15 minutes and
 switches to whichever coin offers the best profit potential per minute.
 """
 import asyncio
+import os
 import sys
 import time as _time
 from market_data import MarketData
@@ -150,12 +151,16 @@ async def main_loop():
                 pass
             await asyncio.sleep(5)
 
-    # Demo always starts on BTC; other modes scan for best coin
+    # Coin selection: honour AGENT_SYMBOL env var (set by manager spawn form);
+    # demo locks to it; testnet/live use it as starting point (auto-switch still applies)
+    _env_symbol = os.environ.get("AGENT_SYMBOL", "").upper().strip()
+    _start_sym  = _env_symbol or cfg.SYMBOL
+
     if cfg.USE_DEMO:
-        active_symbol = cfg.SYMBOL  # "BTCUSDT"
+        active_symbol = _start_sym
         update_state(coin_mode=active_symbol)  # lock coin_mode so auto-switch paths skip
     else:
-        active_symbol = await scanner.scan()
+        active_symbol = _start_sym if _env_symbol else await scanner.scan()
     md = MarketData(active_symbol, cfg.INTERVAL)
     await md.connect()
     asyncio.create_task(_price_pusher())
