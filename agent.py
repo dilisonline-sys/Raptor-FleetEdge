@@ -116,7 +116,20 @@ async def main_loop():
     await server.start()
     await fg.connect()
 
-    equity = await om.get_equity()
+    # Fetch a live price for startup equity so day_start_equity includes any held base asset
+    try:
+        import aiohttp as _aio
+        async with _aio.ClientSession() as _s:
+            async with _s.get("https://api.binance.com/api/v3/ticker/price",
+                               params={"symbol": os.environ.get("AGENT_SYMBOL", "BTCUSDT") or "BTCUSDT"},
+                               timeout=_aio.ClientTimeout(total=5)) as _r:
+                _init_price = float((await _r.json()).get("price", 0))
+    except Exception:
+        _init_price = 0.0
+    equity = await om.get_equity(
+        symbol=os.environ.get("AGENT_SYMBOL", "") or cfg.SYMBOL,
+        price=_init_price if _init_price else None,
+    )
     risk.update_metrics(equity)
 
     async def _price_pusher():
