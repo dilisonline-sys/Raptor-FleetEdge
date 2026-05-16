@@ -456,9 +456,11 @@ async def main_loop():
 
             # Spot mode: only BUY can open a new position (no naked short selling)
             if signal == "BUY" and not em.positions:
-                equity = await om.get_equity(symbol=active_symbol, price=current_price)
+                free_usdt, _ = await om.get_balances_raw(active_symbol)
+                equity = free_usdt + _ * current_price  # recompute from raw balances
                 stop_d = indicators["atr14"] * cfg.ATR_STOP_MULT
-                qty    = PositionSizer.calculate(equity, current_price, stop_d, size_mult)
+                qty    = PositionSizer.calculate(equity, current_price, stop_d, size_mult,
+                                                 usdt_available=free_usdt)
 
                 if qty:
                     order = await om.submit("BUY", qty, tick, indicators,
