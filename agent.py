@@ -118,6 +118,16 @@ async def main_loop():
     equity = await om.get_equity()
     risk.update_metrics(equity)
 
+    async def _price_pusher():
+        """Push live WS ticker price to dashboard state every 2 s for chart live-tick."""
+        while True:
+            try:
+                if md._ws_ticker and md._ws_ticker.get("price", 0) > 0:
+                    update_state(price=md._ws_ticker["price"])
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
     # Demo always starts on BTC; other modes scan for best coin
     if cfg.USE_DEMO:
         active_symbol = cfg.SYMBOL  # "BTCUSDT"
@@ -126,6 +136,7 @@ async def main_loop():
         active_symbol = await scanner.scan()
     md = MarketData(active_symbol, cfg.INTERVAL)
     await md.connect()
+    asyncio.create_task(_price_pusher())
 
     pending_override:    str | None = None
     volatile_since:      float      = 0.0   # when current coin first entered VOLATILE
@@ -298,7 +309,7 @@ async def main_loop():
             regime    = rc.classify(indicators)
             size_mult = {"TRENDING": 1.0, "RANGING": 0.5, "VOLATILE": 0.25}[regime] * fg_mult
             update_state(regime=regime, equity=equity, positions=len(em.positions),
-                         symbol=active_symbol)
+                         symbol=active_symbol, price=current_price)
             push_log(f"[CYCLE] {active_symbol} | price={current_price:.4f} | regime={regime} "
                      f"| RSI={indicators['rsi14']:.1f} | EMA9={indicators['ema9']:.4f}")
 
