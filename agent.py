@@ -71,9 +71,10 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
         long_pullback  = ema_bull and rsi < 32   and price > e50
         short_pullback = ema_bear and rsi < 35   and macd < msig  # oversold in downtrend → short continuation
 
-        # Reversal BUY: extreme oversold even in downtrend (BB lower touch + RSI < 25)
-        # Spot-safe: allows buying the dip when bearish EMA stack is at exhaustion
-        reversal_long = rsi < 25 and price <= bb_lo * 1.002
+        # Reversal BUY: oversold counter-trend entry even in downtrend.
+        # RSI < 40 + price within 1% of lower BB = dip-buy at statistical support.
+        # RSI < 25 triggers unconditionally (extreme crash oversold).
+        reversal_long = (rsi < 40 and price <= bb_lo * 1.01) or rsi < 25
 
         long_signal  = long_momentum  or long_pullback or reversal_long
         short_signal = short_momentum or short_pullback
