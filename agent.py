@@ -428,7 +428,7 @@ async def main_loop():
 
             # Spot mode: only BUY can open a new position (no naked short selling)
             if signal == "BUY" and not em.positions:
-                equity = await om.get_equity()
+                equity = await om.get_equity(symbol=active_symbol, price=current_price)
                 stop_d = indicators["atr14"] * cfg.ATR_STOP_MULT
                 qty    = PositionSizer.calculate(equity, current_price, stop_d, size_mult)
 
@@ -454,7 +454,7 @@ async def main_loop():
                             })
 
             # ── Module 6: Risk Metrics ─────────────────────────────
-            equity = await om.get_equity()
+            equity = await om.get_equity(symbol=active_symbol, price=current_price)
             risk.update_metrics(equity)
             update_state(
                 equity=equity,
