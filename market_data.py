@@ -187,9 +187,7 @@ class MarketData:
             reasons.append(f"spread {book['spread_pct']:.4f}% > limit")
         if tick["volume_usdt"] < cfg.MIN_VOLUME_USDT:
             reasons.append(f"volume {tick['volume_usdt']:.0f} < limit")
-        # Testnet and demo are simulated envs with thin books — use relaxed imbalance range
-        # Only live trading enforces the tighter 0.25–0.75 check
-        imb_lo, imb_hi = (0.25, 0.75) if cfg.USE_LIVE else (0.02, 0.98)
+        imb_lo, imb_hi = (0.02, 0.98)  # uniform across all modes — matches demo behaviour
         if book["imbalance"] < imb_lo or book["imbalance"] > imb_hi:
             reasons.append(f"book imbalance {book['imbalance']:.2f}")
         if reasons:
