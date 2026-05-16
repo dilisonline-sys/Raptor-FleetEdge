@@ -156,7 +156,7 @@ async def main_loop():
     _env_symbol = os.environ.get("AGENT_SYMBOL", "").upper().strip()
     _start_sym  = _env_symbol or cfg.SYMBOL
 
-    if cfg.USE_DEMO:
+    if cfg.USE_DEMO or cfg.USE_LIVE:
         active_symbol = _start_sym
         update_state(coin_mode=active_symbol)  # lock coin_mode so auto-switch paths skip
     else:
