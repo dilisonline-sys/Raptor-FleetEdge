@@ -115,8 +115,12 @@ async def main_loop():
     equity = await om.get_equity()
     risk.update_metrics(equity)
 
-    # Initial scan to pick best symbol
-    active_symbol = await scanner.scan()
+    # Demo always starts on BTC; other modes scan for best coin
+    if cfg.USE_DEMO:
+        active_symbol = cfg.SYMBOL  # "BTCUSDT"
+        update_state(coin_mode=active_symbol)  # lock coin_mode so auto-switch paths skip
+    else:
+        active_symbol = await scanner.scan()
     md = MarketData(active_symbol, cfg.INTERVAL)
     await md.connect()
 
