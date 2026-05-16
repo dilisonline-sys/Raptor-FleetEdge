@@ -44,11 +44,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0a0a0a;color:#ddd;font-family:'Courier New',monospace;padding:20px}
 h1{color:#00e5ff;font-size:1.5rem;margin-bottom:3px}
-h2{color:#444;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;margin:22px 0 8px}
-.sub{color:#444;font-size:.78rem;margin-bottom:20px}
+h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;margin:22px 0 8px}
+.sub{color:#fff;font-size:.78rem;margin-bottom:20px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:6px}
 .card{background:#111;border:1px solid #1e1e1e;border-radius:7px;padding:14px}
-.card .lbl{color:#444;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px}
+.card .lbl{color:#fff;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px}
 .card .val{font-size:1.3rem;font-weight:bold;color:#00e5ff}
 .val.g{color:#00e676}.val.r{color:#ff1744}.val.y{color:#ffd600}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.68rem;font-weight:bold}
@@ -60,46 +60,46 @@ h2{color:#444;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 .chart-wrap{background:#0d0d0d;border:1px solid #1e1e1e;border-radius:8px;overflow:hidden;margin-bottom:4px}
 .chart-header{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid #1a1a1a;background:#111}
 .chart-sym{font-size:.95rem;font-weight:bold;color:#00e5ff}
-.chart-meta{font-size:.7rem;color:#555}
+.chart-meta{font-size:.7rem;color:#fff}
 #chart{width:100%;height:380px}
 .legend{display:flex;gap:16px;padding:6px 14px;background:#0d0d0d;font-size:.68rem}
 .legend span{display:flex;align-items:center;gap:5px}
 .dot{width:10px;height:3px;border-radius:1px}
 /* transactions */
 table{width:100%;border-collapse:collapse;font-size:.73rem;margin-bottom:20px}
-thead th{background:#111;color:#444;font-size:.65rem;text-transform:uppercase;letter-spacing:.07em;padding:7px 9px;border-bottom:1px solid #1e1e1e;text-align:left}
+thead th{background:#111;color:#fff;font-size:.65rem;text-transform:uppercase;letter-spacing:.07em;padding:7px 9px;border-bottom:1px solid #1e1e1e;text-align:left}
 tbody tr{border-bottom:1px solid #141414}
 tbody tr:hover{background:#111}
 td{padding:6px 9px;vertical-align:middle}
 td.buy{color:#00e676;font-weight:bold}
 td.sell{color:#ff1744;font-weight:bold}
-td.close{color:#888}
+td.close{color:#fff}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
 .pp{color:#00e676}.pn{color:#ff1744}
 /* log */
 .log-wrap{background:#080808;border:1px solid #1a1a1a;border-radius:8px;display:flex;flex-direction:column;height:300px}
 .log-toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #1a1a1a;background:#0e0e0e;border-radius:8px 8px 0 0}
-.log-toolbar input{background:#0a0a0a;border:1px solid #222;color:#aaa;padding:3px 8px;border-radius:4px;font-family:inherit;font-size:.7rem;flex:1}
-.log-toolbar button{background:#161616;border:1px solid #222;color:#666;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:.68rem;font-family:inherit}
-.log-toolbar button:hover{color:#aaa}
+.log-toolbar input{background:#0a0a0a;border:1px solid #222;color:#fff;padding:3px 8px;border-radius:4px;font-family:inherit;font-size:.7rem;flex:1}
+.log-toolbar button{background:#161616;border:1px solid #222;color:#fff;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:.68rem;font-family:inherit}
+.log-toolbar button:hover{color:#fff}
 .log-body{flex:1;overflow-y:auto;padding:10px 12px}
 .log-line{font-size:.69rem;line-height:1.7;white-space:pre-wrap;word-break:break-all;border-bottom:1px solid #0f0f0f;padding:1px 0}
 .log-line.err{color:#ff6d6d}
 .log-line.warn{color:#ffd600}
-.log-line.info{color:#7b7b7b}
+.log-line.info{color:#fff}
 .log-line.trade{color:#00e676}
 .log-line.switch{color:#00e5ff}
-.none{color:#333;font-size:.73rem;padding:10px 0}
+.none{color:#fff;font-size:.73rem;padding:10px 0}
 /* coin selector */
-.cbtn{background:#111;border:1px solid #222;color:#666;padding:4px 11px;border-radius:4px;cursor:pointer;font-size:.72rem;font-family:inherit;transition:all .15s}
-.cbtn:hover{border-color:#444;color:#aaa}
+.cbtn{background:#111;border:1px solid #222;color:#fff;padding:4px 11px;border-radius:4px;cursor:pointer;font-size:.72rem;font-family:inherit;transition:all .15s}
+.cbtn:hover{border-color:#fff;color:#fff}
 .cbtn.active{background:#00e5ff;border-color:#00e5ff;color:#000;font-weight:bold}
 .cbtn.auto{background:#161616;border-color:#333;color:#00e5ff}
 .cbtn.auto.active{background:#00e5ff;color:#000}
 </style>
 </head>
 <body>
-<h1>&#9654; __AGENT_NAME__ <span class="badge __MODE_CLASS__">__MODE__</span><span id="sse-status" style="color:#555">○ connecting…</span></h1>
+<h1>&#9654; __AGENT_NAME__ <span class="badge __MODE_CLASS__">__MODE__</span><span id="sse-status" style="color:#fff">○ connecting…</span></h1>
 <div class="sub">
   <span style="color:#00e5ff;font-family:monospace">&#128279; __API_URL__</span>
   &nbsp;·&nbsp; autonomous crypto trading agent
@@ -122,12 +122,12 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 
 <!-- Coin selector -->
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
-  <span style="color:#444;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em">Coin</span>
+  <span style="color:#fff;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em">Coin</span>
   <div id="coin-selector" style="display:flex;gap:6px;flex-wrap:wrap"></div>
 </div>
 
-<div id="thesis-box" style="background:#080808;border:1px solid #1a1a1a;border-radius:8px;padding:12px 16px;font-size:.74rem;color:#9e9e9e;min-height:42px;margin-bottom:4px;font-style:italic;line-height:1.6">
-  <span style="color:#333;font-size:.65rem;font-style:normal;text-transform:uppercase;letter-spacing:.1em;margin-right:8px">&#9670; Claude</span><span id="thesis-text" style="color:#2a2a2a">add ANTHROPIC_API_KEY to enable AI thesis</span>
+<div id="thesis-box" style="background:#080808;border:1px solid #1a1a1a;border-radius:8px;padding:12px 16px;font-size:.74rem;color:#fff;min-height:42px;margin-bottom:4px;font-style:italic;line-height:1.6">
+  <span style="color:#fff;font-size:.65rem;font-style:normal;text-transform:uppercase;letter-spacing:.1em;margin-right:8px">&#9670; Claude</span><span id="thesis-text" style="color:#aaa">add ANTHROPIC_API_KEY to enable AI thesis</span>
 </div>
 
 <h2>&#9646; Chart — <span id="chart-sym-title">loading…</span></h2>
@@ -175,7 +175,7 @@ function initChart() {
   chart = LightweightCharts.createChart(el, {
     width: el.clientWidth,
     height: 380,
-    layout: { background: { color: '#0d0d0d' }, textColor: '#555' },
+    layout: { background: { color: '#0d0d0d' }, textColor: '#fff' },
     grid: { vertLines: { color: '#141414' }, horzLines: { color: '#141414' } },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     rightPriceScale: { borderColor: '#1e1e1e' },
@@ -340,7 +340,7 @@ function renderCards(s) {
   const t = (s.claude_thesis || '').trim();
   const tEl = document.getElementById('thesis-text');
   if (tEl && t) {
-    tEl.style.color = '#9e9e9e';
+    tEl.style.color = '#fff';
     tEl.textContent = t;
   }
 }
