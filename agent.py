@@ -463,6 +463,21 @@ async def main_loop():
                 halt=risk.halt_flag,
             )
 
+            # ── Position heartbeat (displayed every cycle in live log) ────
+            if em.positions:
+                pos = list(em.positions.values())[0]
+                pnl_pct = (current_price - pos.avg_entry) / pos.avg_entry * 100
+                push_log(
+                    f"[STATUS] {active_symbol} | price={current_price:.2f} | entry={pos.avg_entry:.2f} "
+                    f"| pnl={pnl_pct:+.2f}% | stop={pos.stop:.2f} | tp1={pos.tp1:.2f} "
+                    f"| equity={round(equity,2)} | halt={risk.halt_flag}"
+                )
+            else:
+                push_log(
+                    f"[STATUS] {active_symbol} | price={current_price:.2f} | no open position "
+                    f"| signal={signal} | regime={regime} | equity={round(equity,2)}"
+                )
+
             await asyncio.sleep(60)
 
         except KeyboardInterrupt:
