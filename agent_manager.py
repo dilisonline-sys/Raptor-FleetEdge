@@ -28,6 +28,43 @@ MODE_META = {
 # In-memory registry  {name: {pid, port, mode, started_at, log_file}}
 _agents: dict[str, dict] = {}
 
+# Available coins fetched from Binance at startup — sorted by 24h volume
+_available_coins: list[str] = []
+BINANCE_PUBLIC = "https://api.binance.com"
+COIN_BLACKLIST  = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT", "USDPUSDT"}
+
+
+async def _fetch_available_coins():
+    """Fetch all active USDT spot pairs from Binance, sorted by 24h quote volume."""
+    global _available_coins
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(BINANCE_PUBLIC + "/api/v3/ticker/24hr",
+                             timeout=aiohttp.ClientTimeout(total=15)) as r:
+                r.raise_for_status()
+                data = await r.json()
+        coins = []
+        for t in data:
+            sym = t.get("symbol", "")
+            if (sym.endswith("USDT")
+                    and sym not in COIN_BLACKLIST
+                    and t.get("status", "TRADING") != "BREAK"):
+                try:
+                    vol = float(t.get("quoteVolume", 0))
+                    if vol >= 1_000_000:          # min $1 M daily volume
+                        coins.append((sym, vol))
+                except ValueError:
+                    pass
+        coins.sort(key=lambda x: x[1], reverse=True)
+        _available_coins = [c[0] for c in coins]
+        print(f"[manager] loaded {len(_available_coins)} tradeable USDT pairs from Binance")
+    except Exception as e:
+        print(f"[manager] coin fetch failed: {e} — using fallback list")
+        _available_coins = [
+            "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT",
+            "ADAUSDT","DOGEUSDT","AVAXUSDT","DOTUSDT","LINKUSDT",
+        ]
+
 
 def _save_state():
     try:
@@ -168,14 +205,9 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
     </select>
   </div>
   <div class="field">
-    <label>Starting coin</label>
-    <input id="f-coin" type="text" list="coin-list" placeholder="BTCUSDT" value="BTCUSDT" style="min-width:120px">
-    <datalist id="coin-list">
-      <option value="BTCUSDT"><option value="ETHUSDT"><option value="BNBUSDT">
-      <option value="SOLUSDT"><option value="XRPUSDT"><option value="ADAUSDT">
-      <option value="DOGEUSDT"><option value="AVAXUSDT"><option value="DOTUSDT">
-      <option value="LINKUSDT"><option value="LTCUSDT"><option value="MATICUSDT">
-    </datalist>
+    <label>Starting coin <span id="coin-count" style="color:#00e5ff;font-size:.6rem"></span></label>
+    <input id="f-coin" type="text" list="coin-list" placeholder="Loading…" style="min-width:130px">
+    <datalist id="coin-list"></datalist>
   </div>
   <div class="field">
     <label>Dashboard port</label>
@@ -278,6 +310,21 @@ async function startAgent(name, mode, port, symbol) {
   loadAgents();
 }
 
+async function loadCoins() {
+  try {
+    const r = await fetch('/api/coins');
+    const coins = await r.json();
+    const dl = document.getElementById('coin-list');
+    dl.innerHTML = coins.map(c => `<option value="${c}">`).join('');
+    const inp = document.getElementById('f-coin');
+    if (!inp.value) inp.value = coins[0] || 'BTCUSDT';
+    document.getElementById('coin-count').textContent = `(${coins.length} pairs)`;
+  } catch(e) {
+    document.getElementById('f-coin').placeholder = 'BTCUSDT';
+  }
+}
+
+loadCoins();
 loadAgents();
 setInterval(loadAgents, 5000);
 </script>
@@ -292,6 +339,7 @@ class AgentManager:
         self._app = web.Application()
         self._app.router.add_get("/",                    self._dashboard)
         self._app.router.add_get("/api/agents",          self._list)
+        self._app.router.add_get("/api/coins",           self._coins)
         self._app.router.add_post("/api/spawn",          self._spawn)
         self._app.router.add_post("/api/stop",           self._stop)
         self._app.router.add_route("*", "/agent/{name}/{path:.*}", self._proxy)
@@ -305,6 +353,9 @@ class AgentManager:
             status = _agent_status(name)
             result.append({**info, "status": status, "name": name})
         return web.json_response(result)
+
+    async def _coins(self, _):
+        return web.json_response(_available_coins)
 
     async def _spawn(self, request: web.Request):
         body   = await request.json()
@@ -401,6 +452,7 @@ class AgentManager:
 
 async def main():
     _load_state()
+    await _fetch_available_coins()
     manager = AgentManager()
     await manager.start()
     print(f"[manager] Agent Manager started on port {MANAGER_PORT}")
