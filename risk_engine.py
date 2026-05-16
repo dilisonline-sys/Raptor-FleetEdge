@@ -45,8 +45,10 @@ class RiskEngine:
         if self.month_start_equity is None:
             self.month_start_equity = current_equity
 
-        daily_dd   = (self.day_start_equity - current_equity) / self.day_start_equity
-        monthly_dd = (self.month_start_equity - current_equity) / self.month_start_equity
+        daily_dd   = ((self.day_start_equity - current_equity) / self.day_start_equity
+                      if self.day_start_equity else 0.0)
+        monthly_dd = ((self.month_start_equity - current_equity) / self.month_start_equity
+                      if self.month_start_equity else 0.0)
 
         if daily_dd >= cfg.DAILY_DD_LIMIT:
             self._set_halt(4, f"daily drawdown {daily_dd:.1%}", current_equity)
