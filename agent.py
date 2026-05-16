@@ -50,7 +50,7 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
     rsi   = ind["rsi14"]
     macd  = ind["macd"]
     msig  = ind["macd_signal"]
-    price = ind["vwap"]
+    price = ind["close"]   # current close — VWAP is 200-candle average, wrong for EMA/BB comparisons
     bb_lo = ind["bb_lower"]
     bb_hi = ind["bb_upper"]
 

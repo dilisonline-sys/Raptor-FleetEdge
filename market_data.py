@@ -178,6 +178,7 @@ class MarketData:
         tp                 = (df["high"] + df["low"] + df["close"]) / 3
         vp                 = (tp * df["volume"]).cumsum()
         ind["vwap"]        = (vp / df["volume"].cumsum()).iloc[-1]
+        ind["close"]       = float(c.iloc[-1])   # current close — use this for EMA/BB comparisons
         return ind
 
     def quality_gate(self, tick: dict, book: dict) -> bool:
