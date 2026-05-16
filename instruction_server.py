@@ -29,6 +29,7 @@ _state = {
     "fear_greed":    {"value": 50, "label": "Neutral"},
     "claude_thesis": "",
     "coin_mode":     "auto",   # "auto" | "<SYMBOL>"
+    "price":         0.0,      # current live price — updated every cycle for chart ticks
 }
 
 # ── HTML template ──────────────────────────────────────────────────────────────
@@ -168,6 +169,7 @@ let _currentSym  = '';
 let _lastOpenPos = null;
 let _coinMode    = 'auto';   // 'auto' | 'BTCUSDT' etc.
 let _topCoins    = [];       // last known top coins list
+let _lastCandle  = null;     // last candle OHLC — updated live from SSE price ticks
 
 // ── Chart init ────────────────────────────────────────────
 function initChart() {
@@ -223,6 +225,7 @@ async function refreshChart(sym) {
     const cd = await r.json();
     if (!cd || !cd.candles || !cd.candles.length) return;
     candleSeries.setData(cd.candles);
+    _lastCandle = { ...cd.candles[cd.candles.length - 1] };
     if (cd.ema9  && cd.ema9.length)  ema9Series.setData(cd.ema9);
     if (cd.ema21 && cd.ema21.length) ema21Series.setData(cd.ema21);
     updatePosLines(_lastOpenPos);
@@ -246,7 +249,20 @@ function connectSSE() {
       const sym = s.symbol || '';
       if (sym && sym !== _currentSym) {
         _currentSym = sym;
+        _lastCandle = null;
         refreshChart(sym);
+      }
+      // Live-tick the current candle's close from SSE price — no extra HTTP fetch
+      if (s.price && s.price > 0 && _lastCandle && candleSeries) {
+        const p = s.price;
+        _lastCandle = {
+          time:  _lastCandle.time,
+          open:  _lastCandle.open,
+          high:  Math.max(_lastCandle.high, p),
+          low:   Math.min(_lastCandle.low,  p),
+          close: p,
+        };
+        candleSeries.update(_lastCandle);
       }
       sseRetries = 0;
       document.getElementById('sse-status').textContent = '● live';
@@ -457,7 +473,7 @@ initChart();
 renderCoinSelector([], 'auto');                              // show Auto button immediately on load
 refresh();                                                   // immediate first load
 connectSSE();                                               // then switch to real-time stream
-setInterval(() => { if (_currentSym) refreshChart(_currentSym); }, 30000); // chart refresh every 30s
+setInterval(() => { if (_currentSym) refreshChart(_currentSym); }, 10000); // full OHLCV refresh every 10s
 </script>
 </body>
 </html>
