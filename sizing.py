@@ -42,7 +42,14 @@ class PositionSizer:
             final_qty   = min(final_qty, max_by_usdt)
 
         if final_qty * entry_price < 10.0:
-            log("MODULE_2", "SIZING_ABORT", reason="order below 10 USDT minimum")
+            log("MODULE_2", "SIZING_ABORT", reason="order below 10 USDT minimum",
+                final_qty=round(final_qty, 8), entry_price=round(entry_price, 2),
+                order_value=round(final_qty * entry_price, 4),
+                equity=round(equity, 2), stop_d=round(stop_distance, 4),
+                size_mult=size_mult, vol_mult=vol_mult,
+                usdt_avail=round(usdt_available, 2) if usdt_available else None,
+                max_by_trade=round(max_by_trade, 8),
+                max_by_usdt=round((usdt_available * 0.98) / entry_price, 8) if usdt_available else None)
             return None
 
         log("MODULE_2", "SIZING_CALC",

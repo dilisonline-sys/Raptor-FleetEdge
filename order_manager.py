@@ -54,23 +54,38 @@ class OrderManager:
         return 1.0  # safe fallback
 
     async def get_equity(self, symbol: str | None = None, price: float | None = None) -> float:
-        """Total portfolio value in USDT.
-        Pass symbol+price to include the value of any held base asset
-        (e.g. BTC balance × current price), so a spot BUY doesn't look like a drawdown.
+        """Total portfolio value in USDT — counts USDT + all held coins at live prices.
+        Active base asset is priced at the provided `price` (live WS tick); all others via REST.
         """
         await self._ensure_session()
         params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
         params["signature"] = _sign(params)
         async with self._session.get(cfg.SPOT_BASE_URL + "/api/v3/account", params=params) as r:
             r.raise_for_status()
-            data     = await r.json()
-            balances = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in data["balances"]}
-            usdt     = balances.get("USDT", 0.0)
-            # Include value of held base asset (e.g. BTC) so buying doesn't look like a loss
-            if symbol and price and price > 0:
-                base     = symbol.replace("USDT", "")
-                base_bal = balances.get(base, 0.0)
-                usdt    += base_bal * price
+            data        = await r.json()
+            balances    = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in data["balances"]}
+            usdt        = balances.get("USDT", 0.0)
+            active_base = symbol.replace("USDT", "") if symbol else None
+
+            # Add active base at caller-provided live price
+            if active_base and price and price > 0:
+                usdt += balances.get(active_base, 0.0) * price
+
+            # Price every other non-USDT, non-active-base coin via REST
+            for asset, bal in balances.items():
+                if asset in ("USDT",) or asset == active_base or bal < 1e-8:
+                    continue
+                try:
+                    async with self._session.get(
+                        cfg.PUBLIC_DATA_URL + "/api/v3/ticker/price",
+                        params={"symbol": asset + "USDT"}
+                    ) as rp:
+                        coin_price = float((await rp.json()).get("price", 0))
+                    if coin_price > 0:
+                        usdt += bal * coin_price
+                except Exception:
+                    pass
+
             log("MODULE_2", "EQUITY_FETCH", usdt=round(usdt, 2))
             return usdt
 
@@ -88,17 +103,68 @@ class OrderManager:
                     return float(b["free"])
         return 0.0
 
-    async def get_balances_raw(self, symbol: str) -> tuple[float, float]:
-        """Returns (usdt_total, base_total) — free + locked. Single API call."""
+    async def get_balances_raw(self, symbol: str) -> tuple[float, float, float]:
+        """Returns (non_base_usdt_equiv, base_qty, raw_usdt).
+        non_base_usdt_equiv = USDT + all non-active coins priced at REST (BTC, orphan alts, etc.)
+        base_qty            = active base asset quantity (caller provides live price for it)
+        raw_usdt            = spendable USDT only (for order sizing)
+        This split lets callers compute: equity = non_base_usdt_equiv + base_qty * live_price
+        """
         await self._ensure_session()
         base = symbol.replace("USDT", "")
         params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
         params["signature"] = _sign(params)
         async with self._session.get(cfg.SPOT_BASE_URL + "/api/v3/account", params=params) as r:
             r.raise_for_status()
+            data     = await r.json()
+            bals     = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in data["balances"]}
+            raw_usdt = bals.get("USDT", 0.0)
+            usdt     = raw_usdt
+            # Price every non-USDT coin EXCEPT the active base (caller prices that with live WS tick)
+            for asset, bal in bals.items():
+                if asset in ("USDT", base) or bal < 1e-8:
+                    continue
+                try:
+                    async with self._session.get(
+                        cfg.PUBLIC_DATA_URL + "/api/v3/ticker/price",
+                        params={"symbol": asset + "USDT"}
+                    ) as rp:
+                        coin_price = float((await rp.json()).get("price", 0))
+                    if coin_price > 0:
+                        usdt += bal * coin_price
+                except Exception:
+                    pass
+            return usdt, bals.get(base, 0.0), raw_usdt
+
+    async def get_all_significant_balances(self, min_usdt_value: float = 5.0) -> list[dict]:
+        """Returns all coin holdings worth > min_usdt_value as [{asset, qty, usdt_value}].
+        Used by orphan recovery to find unmanaged positions across all coins.
+        """
+        await self._ensure_session()
+        params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
+        params["signature"] = _sign(params)
+        async with self._session.get(cfg.SPOT_BASE_URL + "/api/v3/account", params=params) as r:
+            r.raise_for_status()
             data = await r.json()
             bals = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in data["balances"]}
-            return bals.get("USDT", 0.0), bals.get(base, 0.0)
+        result = []
+        for asset, qty in bals.items():
+            if asset == "USDT" or qty < 1e-8:
+                continue
+            try:
+                async with self._session.get(
+                    cfg.PUBLIC_DATA_URL + "/api/v3/ticker/price",
+                    params={"symbol": asset + "USDT"}
+                ) as rp:
+                    coin_price = float((await rp.json()).get("price", 0))
+                if coin_price > 0:
+                    usdt_val = qty * coin_price
+                    if usdt_val >= min_usdt_value:
+                        result.append({"asset": asset, "qty": qty,
+                                       "usdt_value": usdt_val, "price": coin_price})
+            except Exception:
+                pass
+        return result
 
     async def _post_order(self, params: dict, retries: int = 3) -> dict | None:
         await self._ensure_session()

@@ -15,12 +15,13 @@ import pandas_ta as ta
 from logger import log
 import config as cfg
 
-SCAN_INTERVAL   = 900        # re-rank every 15 minutes
-MIN_VOLUME_USDT = 5_000_000  # minimum 24h volume
-MIN_PRICE_CHG   = 0.5        # minimum 24h % move (need momentum)
-MAX_SPREAD_PCT  = 0.15       # tighter pre-filter than quality gate (0.15%)
-TOP_N           = 10         # analyse full indicators on top N by quick score
-BLACKLIST       = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT"}  # stablecoins
+SCAN_INTERVAL   = 300        # re-rank every 5 minutes (matches cycle)
+MIN_VOLUME_USDT = 10_000_000 # spec minimum — filters illiquid noise
+MIN_PRICE_CHG   = 1.0        # need at least 1% move — momentum only
+MAX_SPREAD_PCT  = 0.15       # pre-filter tight spread
+TOP_N           = 12         # score top 12 candidates with indicators
+BLACKLIST       = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT",
+                   "USD1USDT", "USDTUSDT"}  # stablecoins + tether pairs
 
 
 class MarketScanner:
@@ -82,10 +83,10 @@ class MarketScanner:
         return candidates[:TOP_N]
 
     async def _score_with_indicators(self, sym: str) -> float:
-        """Fetch 1H OHLCV and compute a deep score for a single symbol."""
+        """Fetch 15m OHLCV and compute a deep score — volatility-weighted for momentum strategy."""
         try:
             data = await self._get("/api/v3/klines",
-                                   {"symbol": sym, "interval": "1h", "limit": 48})
+                                   {"symbol": sym, "interval": "15m", "limit": 60})
             df = pd.DataFrame(data, columns=[
                 "open_time","open","high","low","close","volume",
                 "close_time","qv","nt","tbbav","tbqav","ignore"])
@@ -112,28 +113,40 @@ class MarketScanner:
             msig  = _macd[msig_col].dropna().iloc[-1] if msig_col in _macd and len(_macd[msig_col].dropna()) else 0
             price = c.iloc[-1]
 
-            # Volatility score: ATR/price (bigger moves = more opportunity)
-            vol_score  = min(atr / price * 100, 5.0)      # cap at 5%
+            # Volatility score: ATR%/price — primary driver for momentum strategy
+            atr_pct    = atr / price * 100
+            vol_score  = min(atr_pct * 2.0, 10.0)  # double-weight ATR, cap at 10
 
-            # Trend score: EMA alignment + MACD confirmation
+            # Trend score: TRENDING regime only is valid — hard penalise no-trend
             trend_up   = e9 > e21 > e50 and macd > msig
             trend_dn   = e9 < e21 < e50 and macd < msig
-            trend_score = 2.0 if (trend_up or trend_dn) else 0.8
+            trend_score = 3.0 if (trend_up or trend_dn) else 0.3  # strong bias to trending
 
-            # RSI score: tradeable zone (30-70) scores highest; extremes (<25/>75) penalised
-            rsi_score  = 1.5 if 30 < rsi < 70 else (1.0 if 20 < rsi < 80 else 0.5)
+            # RSI score: momentum zone (40-65 for long, 35-60 for short) scores highest
+            rsi_score  = 1.5 if 35 < rsi < 68 else (0.8 if 25 < rsi < 78 else 0.3)
 
-            # Profit per minute proxy: vol_score * trend * rsi_quality
+            # Combined: volatility × trend alignment × RSI quality
             deep_score = vol_score * trend_score * rsi_score
+            trend_str  = ("↑ BULL" if trend_up else "↓ BEAR" if trend_dn else "→ FLAT")
+
+            # Regime: mirror the main RegimeClassifier logic (no import needed)
+            vol_ratio = atr / price if price else 0
+            if vol_ratio > 0.05:
+                regime = "VOLATILE"
+            elif trend_up or trend_dn:
+                regime = "TRENDING"
+            else:
+                regime = "RANGING"
 
             log("SCANNER", "DEEP_SCORE", symbol=sym,
-                atr_pct=round(atr/price*100, 3), trend=str(trend_up or trend_dn),
+                atr_pct=round(atr_pct, 3), trend=trend_str, regime=regime,
                 rsi=round(rsi, 1), score=round(deep_score, 4))
-            return deep_score
+            return {"score": deep_score, "atr_pct": atr_pct, "trend": trend_str,
+                    "rsi": round(rsi, 1), "regime": regime}
 
         except Exception as e:
             log("SCANNER", "SCORE_ERROR", symbol=sym, error=str(e))
-            return 0.0
+            return {"score": 0.0, "atr_pct": 0.0, "trend": "—", "rsi": 50, "regime": "—"}
 
     async def scan(self, exclude: set[str] | None = None, force: bool = False) -> str:
         """Full scan — returns the best symbol to trade right now.
@@ -160,13 +173,20 @@ class MarketScanner:
             return self.best_symbol
 
         # Deep score top candidates in parallel
-        scores = await asyncio.gather(
+        results = await asyncio.gather(
             *[self._score_with_indicators(c["symbol"]) for c in top_quick]
         )
 
         ranked = []
-        for cand, score in zip(top_quick, scores):
-            ranked.append({**cand, "deep_score": score})
+        for cand, res in zip(top_quick, results):
+            ranked.append({
+                **cand,
+                "deep_score": res["score"],
+                "atr_pct":    res["atr_pct"],
+                "trend":      res["trend"],
+                "rsi":        res["rsi"],
+                "regime":     res.get("regime", "—"),
+            })
         ranked.sort(key=lambda x: x["deep_score"], reverse=True)
 
         self.ranked      = ranked

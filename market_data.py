@@ -179,6 +179,7 @@ class MarketData:
         vp                 = (tp * df["volume"]).cumsum()
         ind["vwap"]        = (vp / df["volume"].cumsum()).iloc[-1]
         ind["close"]       = float(c.iloc[-1])   # current close — use this for EMA/BB comparisons
+        ind["open"]        = float(df["open"].iloc[-1])   # last candle open — for candle body filter
         return ind
 
     def quality_gate(self, tick: dict, book: dict) -> bool:
@@ -187,7 +188,7 @@ class MarketData:
             reasons.append(f"spread {book['spread_pct']:.4f}% > limit")
         if tick["volume_usdt"] < cfg.MIN_VOLUME_USDT:
             reasons.append(f"volume {tick['volume_usdt']:.0f} < limit")
-        imb_lo, imb_hi = (0.02, 0.98)  # uniform across all modes — matches demo behaviour
+        imb_lo, imb_hi = (0.02, 0.98)  # practical: BTC runs 0.95+ naturally, only block extreme wash
         if book["imbalance"] < imb_lo or book["imbalance"] > imb_hi:
             reasons.append(f"book imbalance {book['imbalance']:.2f}")
         if reasons:
