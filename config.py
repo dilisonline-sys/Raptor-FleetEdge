@@ -79,44 +79,45 @@ USE_LIVE    = TRADING_MODE == "live"
 
 # ── Symbol & interval ─────────────────────────────────────
 SYMBOL       = "BTCUSDT"
-INTERVAL     = "1h"
+INTERVAL     = "15m"
 CANDLE_LIMIT = 200
 
 # ── Per-mode risk parameters (testnet == demo; live can differ) ──
 _RISK = {
     #              risk_pct  max_trade  exposure  leverage  daily_dd  monthly_dd  consec_loss
-    "testnet": (   0.02,     0.08,      0.30,     5,        0.07,     0.20,       4 ),
-    "demo":    (   0.02,     0.08,      0.30,     5,        0.07,     0.20,       4 ),
-    "live":    (   0.50,     0.80,      0.90,     5,        0.07,     0.20,       4 ),
+    "testnet": (   0.02,     0.08,      0.30,     3,        0.05,     0.15,       3 ),
+    "demo":    (   0.02,     0.08,      0.30,     3,        0.05,     0.15,       3 ),
+    "live":    (   0.10,     0.70,      0.70,     3,        0.05,     0.15,       3 ),
 }
 (RISK_PCT, MAX_TRADE_PCT, MAX_EXPOSURE, MAX_LEVERAGE,
  DAILY_DD_LIMIT, MONTHLY_DD_LIMIT, MAX_CONSEC_LOSS) = _RISK[TRADING_MODE]
 
 # ── Entry filters ─────────────────────────────────────────
-MAX_SPREAD_PCT  = 0.0020
-MIN_VOLUME_USDT = 5_000_000
-MAX_FUNDING     = 0.0015
-MAX_SLIPPAGE    = 0.0015
+MAX_SPREAD_PCT  = 0.0015   # 0.15% — spec aligned
+MIN_VOLUME_USDT = 10_000_000  # spec aligned
+MAX_FUNDING     = 0.0010   # 0.1% per 8h — spec aligned
+MAX_SLIPPAGE    = 0.0010   # 0.1% — spec aligned
 
 # ── Indicators ────────────────────────────────────────────
 ATR_PERIOD     = 14
-ATR_STOP_MULT  = 1.2
-ATR_TRAIL_MULT = 0.8
+ATR_STOP_MULT  = 1.5   # spec aligned
+ATR_TRAIL_MULT = 1.0   # spec aligned
 RSI_PERIOD     = 14
-RSI_EXIT_LONG  = 80
-RSI_EXIT_SHORT = 20
+RSI_EXIT_LONG  = 78    # spec aligned
+RSI_EXIT_SHORT = 22    # spec aligned
 
 # ── Take profits ──────────────────────────────────────────
-TP1_R   = 2.0
-TP2_R   = 3.5
-TP3_R   = 6.0
+TP1_R   = 1.5   # spec aligned — 1.5R
+TP2_R   = 2.5   # spec aligned — 2.5R
+TP3_R   = 4.0   # spec aligned — 4.0R
 TP1_PCT = 0.33
 TP2_PCT = 0.33
 TP3_PCT = 0.34
 
-# ── Time exits ────────────────────────────────────────────
-MAX_TRADE_HOURS_SPOT    = 72
-MAX_TRADE_HOURS_FUTURES = 12
+# ── Time exits (5-min cycle checks; 2h target window) ─────
+MAX_TRADE_HOURS_SPOT    = 2   # exit if trade flat after 2h
+MAX_TRADE_HOURS_FUTURES = 2
+CYCLE_SLEEP_SECONDS     = 300  # 5-minute update window
 
 # ── Alerts ────────────────────────────────────────────────
 ALERT_WEBHOOK = os.environ.get("DIPU_ALERT_WEBHOOK", "")

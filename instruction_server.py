@@ -8,7 +8,7 @@ from aiohttp import web
 from logger import log
 import config as cfg
 
-VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN"}
+VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO"}
 
 _state = {
     "started_at":    time.time(),
@@ -27,9 +27,16 @@ _state = {
     "chart_data":    {},
     "open_pos":      None,
     "fear_greed":    {"value": 50, "label": "Neutral"},
-    "claude_thesis": "",
     "coin_mode":     "auto",   # "auto" | "<SYMBOL>"
     "price":         0.0,      # current live price — updated every cycle for chart ticks
+    "interval":      cfg.INTERVAL,
+    "risk_pct":      cfg.RISK_PCT,
+    "max_trade_pct": cfg.MAX_TRADE_PCT,
+    "cycle_sleep":   cfg.CYCLE_SLEEP_SECONDS,
+    "strategy":      "Volatility Chase · Momentum Only",
+    "scanner_ranked": [],
+    "scanner_best":   "—",
+    "scanner_ts":     0,
 }
 
 # ── HTML template ──────────────────────────────────────────────────────────────
@@ -107,6 +114,12 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
   &nbsp;·&nbsp;
   <button id="stop-btn" onclick="stopAgent()" style="background:#ff1744;color:#fff;border:none;padding:3px 12px;border-radius:4px;font-family:inherit;font-size:.72rem;cursor:pointer;margin-left:6px">&#9646;&#9646; Stop Trading</button>
   <button id="start-btn" onclick="startAgent()" style="background:#00e676;color:#000;border:none;padding:3px 12px;border-radius:4px;font-family:inherit;font-size:.72rem;cursor:pointer;margin-left:4px;display:none">&#9654; Resume Trading</button>
+  &nbsp;|&nbsp;
+  <button id="btn-buy"  onclick="marketOrder('BUY')"  style="background:#00e676;color:#000;border:none;padding:3px 14px;border-radius:4px;font-family:inherit;font-size:.72rem;cursor:pointer;font-weight:bold;margin-left:4px">&#9650; Buy —</button>
+  <button id="btn-sell" onclick="marketOrder('SELL')" style="background:#ff1744;color:#fff;border:none;padding:3px 14px;border-radius:4px;font-family:inherit;font-size:.72rem;cursor:pointer;font-weight:bold;margin-left:4px">&#9660; Sell —</button>
+  &nbsp;|&nbsp;
+  <button onclick="forceBTC()" style="background:#f7931a;color:#000;border:none;padding:3px 14px;border-radius:4px;font-family:inherit;font-size:.72rem;cursor:pointer;font-weight:bold;margin-left:4px">&#9679; Trade BTC</button>
+  <button onclick="resumeAuto()" style="background:#00e5ff;color:#000;border:none;padding:3px 14px;border-radius:4px;font-family:inherit;font-size:.72rem;cursor:pointer;font-weight:bold;margin-left:4px">&#9654; Trade Auto</button>
 </div>
 
 <div class="grid" id="cards">
@@ -119,16 +132,16 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
   <div class="card"><div class="lbl">Last Signal</div><div class="val" id="c-sig">—</div></div>
   <div class="card"><div class="lbl">Uptime</div><div class="val g" id="c-up">—</div></div>
   <div class="card"><div class="lbl">Fear &amp; Greed</div><div class="val" id="c-fg" style="font-size:1rem">—</div></div>
+  <div class="card"><div class="lbl">Interval</div><div class="val y" id="c-interval">—</div></div>
+  <div class="card"><div class="lbl">Risk / Max Trade</div><div class="val" id="c-risk">—</div></div>
+  <div class="card"><div class="lbl">Cycle</div><div class="val" id="c-cycle">—</div></div>
+  <div class="card"><div class="lbl">Strategy</div><div class="val g" id="c-strat">—</div></div>
 </div>
 
 <!-- Coin selector -->
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
   <span style="color:#fff;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em">Coin</span>
   <div id="coin-selector" style="display:flex;gap:6px;flex-wrap:wrap"></div>
-</div>
-
-<div id="thesis-box" style="background:#080808;border:1px solid #1a1a1a;border-radius:8px;padding:12px 16px;font-size:.74rem;color:#fff;min-height:42px;margin-bottom:4px;font-style:italic;line-height:1.6">
-  <span style="color:#fff;font-size:.65rem;font-style:normal;text-transform:uppercase;letter-spacing:.1em;margin-right:8px">&#9670; Claude</span><span id="thesis-text" style="color:#aaa">add ANTHROPIC_API_KEY to enable AI thesis</span>
 </div>
 
 <h2>&#9646; Chart — <span id="chart-sym-title">loading…</span></h2>
@@ -145,6 +158,51 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
     <span><div class="dot" style="background:#ff1744;width:2px;height:12px;border-radius:0"></div>Stop</span>
     <span><div class="dot" style="background:#00bcd4;width:2px;height:12px;border-radius:0"></div>TP1/TP2</span>
   </div>
+</div>
+
+<h2>&#9646; Market Scanner <span id="scanner-ts" style="font-size:.6rem;color:#555;margin-left:8px">scanning…</span></h2>
+<div style="background:#0d0d0d;border:1px solid #1e1e1e;border-radius:8px;padding:12px;margin-bottom:20px;overflow-x:auto">
+  <table style="width:100%;border-collapse:collapse;font-size:.7rem">
+    <thead>
+      <tr style="color:#555;text-transform:uppercase;letter-spacing:.06em;font-size:.62rem">
+        <th style="text-align:left;padding:4px 8px">#</th>
+        <th style="text-align:left;padding:4px 8px">Symbol</th>
+        <th style="text-align:right;padding:4px 8px">Score</th>
+        <th style="text-align:right;padding:4px 8px">ATR%</th>
+        <th style="text-align:right;padding:4px 8px">24h %</th>
+        <th style="text-align:right;padding:4px 8px">Vol (M)</th>
+        <th style="text-align:center;padding:4px 8px">Trend</th>
+        <th style="text-align:center;padding:4px 8px">Regime</th>
+        <th style="text-align:center;padding:4px 8px">Action</th>
+      </tr>
+    </thead>
+    <tbody id="scanner-tbody">
+      <tr><td colspan="9" style="color:#555;padding:10px 8px">Scanning market…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>&#9646; Binance Orders <span id="orders-refresh" style="font-size:.6rem;color:#555;cursor:pointer;margin-left:8px" onclick="loadOrders()">&#8635; refresh</span></h2>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
+  <div>
+    <div style="font-size:.65rem;color:#fff;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Open Orders</div>
+    <div id="open-orders-wrap" style="background:#0d0d0d;border:1px solid #1e1e1e;border-radius:6px;padding:10px;font-size:.7rem;min-height:40px"></div>
+  </div>
+  <div>
+    <div style="font-size:.65rem;color:#fff;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Order History</div>
+    <div id="order-history-wrap" style="background:#0d0d0d;border:1px solid #1e1e1e;border-radius:6px;padding:10px;font-size:.7rem;min-height:40px"></div>
+  </div>
+</div>
+
+<h2>&#9646; AI Usage &amp; Cost</h2>
+<div style="background:#0d0d0d;border:1px solid #1e1e1e;border-radius:8px;padding:14px;margin-bottom:16px">
+  <div style="display:flex;gap:24px;margin-bottom:12px;font-size:.75rem">
+    <div>Requests: <span id="ai-total-req" style="color:#ffd600;font-weight:600">—</span></div>
+    <div>Input tokens: <span id="ai-total-in" style="color:#82b1ff;font-weight:600">—</span></div>
+    <div>Output tokens: <span id="ai-total-out" style="color:#82b1ff;font-weight:600">—</span></div>
+    <div>Total cost: <span id="ai-total-cost" style="color:#00e676;font-weight:600">—</span></div>
+  </div>
+  <div id="ai-log-wrap" style="font-size:.68rem;max-height:180px;overflow-y:auto"></div>
 </div>
 
 <h2>&#9646; Transactions</h2>
@@ -217,17 +275,33 @@ function updatePosLines(pos) {
   }
 }
 
+// Browser local timezone offset in seconds (e.g. GMT+4 → +14400)
+const TZ_OFFSET = -new Date().getTimezoneOffset() * 60;
+
 // ── Chart data — polled separately (heavy payload) ────────
 async function refreshChart(sym) {
   if (!sym || sym === '—') return;
   try {
     const r  = await fetch('/api/chart?symbol=' + encodeURIComponent(sym));
+    if (!r.ok) return;
     const cd = await r.json();
     if (!cd || !cd.candles || !cd.candles.length) return;
-    candleSeries.setData(cd.candles);
-    _lastCandle = { ...cd.candles[cd.candles.length - 1] };
-    if (cd.ema9  && cd.ema9.length)  ema9Series.setData(cd.ema9);
-    if (cd.ema21 && cd.ema21.length) ema21Series.setData(cd.ema21);
+    // Shift all timestamps to local time so the axis shows local hours
+    const shiftC = c => ({...c, time: c.time + TZ_OFFSET});
+    const shiftV = v => ({...v, time: v.time + TZ_OFFSET});
+    candleSeries.setData(cd.candles.map(shiftC));
+    // Anchor _lastCandle using local bar boundary
+    const last    = cd.candles[cd.candles.length - 1];
+    const barTime = Math.floor((Date.now() / 1000 + TZ_OFFSET) / 3600) * 3600;
+    _lastCandle = {
+      time:  Math.max(last.time + TZ_OFFSET, barTime),
+      open:  barTime > last.time + TZ_OFFSET ? last.close : last.open,
+      high:  barTime > last.time + TZ_OFFSET ? last.close : last.high,
+      low:   barTime > last.time + TZ_OFFSET ? last.close : last.low,
+      close: last.close,
+    };
+    if (cd.ema9  && cd.ema9.length)  ema9Series.setData(cd.ema9.map(shiftV));
+    if (cd.ema21 && cd.ema21.length) ema21Series.setData(cd.ema21.map(shiftV));
     updatePosLines(_lastOpenPos);
   } catch(e) { console.error('chart fetch:', e); }
 }
@@ -244,6 +318,7 @@ function connectSSE() {
       updatePosLines(_lastOpenPos);
       renderTx(s.transactions || []);
       renderLog(s.last_log || []);
+      renderScanner(s);
       syncHaltButtons(s.halt || false);
       // Refresh chart immediately on symbol switch
       const sym = s.symbol || '';
@@ -253,16 +328,28 @@ function connectSSE() {
         refreshChart(sym);
       }
       // Live-tick the current candle's close from SSE price — no extra HTTP fetch
-      if (s.price && s.price > 0 && _lastCandle && candleSeries) {
+      if (s.price && s.price > 0 && candleSeries) {
         const p = s.price;
-        _lastCandle = {
-          time:  _lastCandle.time,
-          open:  _lastCandle.open,
-          high:  Math.max(_lastCandle.high, p),
-          low:   Math.min(_lastCandle.low,  p),
-          close: p,
-        };
-        candleSeries.update(_lastCandle);
+        // If _lastCandle is missing (chart not loaded yet), trigger a load now
+        if (!_lastCandle) {
+          if (sym) refreshChart(sym);
+        } else {
+          // Always anchor time to current 1H bar boundary (local time) to survive bar rollovers
+          const barTime = Math.floor((Date.now() / 1000 + TZ_OFFSET) / 3600) * 3600;
+          // If bar rolled over, open new bar from last close
+          if (barTime > _lastCandle.time) {
+            _lastCandle = { time: barTime, open: p, high: p, low: p, close: p };
+          } else {
+            _lastCandle = {
+              time:  _lastCandle.time,
+              open:  _lastCandle.open,
+              high:  Math.max(_lastCandle.high, p),
+              low:   Math.min(_lastCandle.low,  p),
+              close: p,
+            };
+          }
+          try { candleSeries.update(_lastCandle); } catch(e) { console.warn('chart update failed:', e); }
+        }
       }
       sseRetries = 0;
       document.getElementById('sse-status').textContent = '● live';
@@ -288,6 +375,7 @@ async function refresh() {
     _currentSym  = s.symbol || '';
     renderTx(s.transactions || []);
     renderLog(s.last_log || []);
+    renderScanner(s);
     if (_currentSym) refreshChart(_currentSym);
   } catch(e) { console.error(e); }
 }
@@ -336,8 +424,20 @@ function renderCards(s) {
   ddEl.className = 'val ' + (parseFloat(dd) > 3 ? 'r' : 'g');
   setEl('c-sig', s.last_signal || '—');
   setEl('c-up',  `${h}h ${m}m`);
+  setEl('c-interval', s.interval || '—');
+  setEl('c-risk', s.risk_pct ? (s.risk_pct*100).toFixed(0)+'% / '+(s.max_trade_pct*100).toFixed(0)+'%' : '—');
+  setEl('c-cycle', s.cycle_sleep ? s.cycle_sleep+'s' : '—');
+  setEl('c-strat', s.strategy || '—');
   document.getElementById('chart-sym-title').textContent = s.symbol || '—';
-  document.getElementById('chart-sym-label').textContent = (s.symbol||'—') + ' · 1H';
+  document.getElementById('chart-sym-label').textContent = (s.symbol||'—') + ' · ' + (s.interval||'1H');
+  // Update Buy/Sell button labels with live price
+  if (s.price && s.price > 0) {
+    const priceStr = s.price < 0.01 ? s.price.toFixed(6) : s.price < 1 ? s.price.toFixed(4) : s.price.toFixed(2);
+    const buyBtn  = document.getElementById('btn-buy');
+    const sellBtn = document.getElementById('btn-sell');
+    if (buyBtn)  buyBtn.textContent  = '▲ Buy @ ' + priceStr;
+    if (sellBtn) sellBtn.textContent = '▼ Sell @ ' + priceStr;
+  }
   // Refresh coin buttons only when the list itself changes — never touch _coinMode from server
   const incoming = (s.top_coins || []).join(',');
   if (incoming !== _topCoins.join(',')) {
@@ -351,13 +451,6 @@ function renderCards(s) {
     fgEl.textContent = fg.value + ' · ' + (fg.label || 'Neutral');
     const v = fg.value;
     fgEl.style.color = v <= 20 ? '#ff1744' : v <= 40 ? '#ff9800' : v <= 60 ? '#ffd600' : v <= 80 ? '#66bb6a' : '#00e676';
-  }
-  // Claude thesis — only update when there's real content
-  const t = (s.claude_thesis || '').trim();
-  const tEl = document.getElementById('thesis-text');
-  if (tEl && t) {
-    tEl.style.color = '#fff';
-    tEl.textContent = t;
   }
 }
 
@@ -438,6 +531,57 @@ function setEl(id, val) {
   if (el) el.textContent = val;
 }
 
+// ── Market order buttons ──────────────────────────────────
+async function marketOrder(side) {
+  const label = side === 'BUY' ? '▲ Market BUY' : '▼ Market SELL';
+  if (!confirm(`Send ${label} signal to dipu?\nThis will execute immediately at market price.`)) return;
+  const r = await fetch('/instruction', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
+    body: JSON.stringify({action: side, source: 'dashboard'}),
+  }).catch(() => null);
+  if (r && r.ok) {
+    const flash = document.createElement('div');
+    flash.textContent = `${label} sent`;
+    flash.style.cssText = 'position:fixed;top:16px;right:20px;background:'+(side==='BUY'?'#00e676':'#ff1744')+';color:'+(side==='BUY'?'#000':'#fff')+';padding:8px 18px;border-radius:6px;font-family:monospace;font-size:.8rem;font-weight:bold;z-index:9999';
+    document.body.appendChild(flash);
+    setTimeout(() => flash.remove(), 2500);
+  }
+}
+
+// ── Resume Auto button ───────────────────────────────────
+async function resumeAuto() {
+  const r = await fetch('/instruction', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
+    body: JSON.stringify({action: 'RESUME_AUTO', source: 'dashboard'}),
+  }).catch(() => null);
+  if (r && r.ok) {
+    const flash = document.createElement('div');
+    flash.textContent = '⟳ Auto-scanner enabled';
+    flash.style.cssText = 'position:fixed;top:16px;right:20px;background:#00e5ff;color:#000;padding:8px 18px;border-radius:6px;font-family:monospace;font-size:.8rem;font-weight:bold;z-index:9999';
+    document.body.appendChild(flash);
+    setTimeout(() => flash.remove(), 3000);
+  }
+}
+
+// ── Force BTC button ─────────────────────────────────────
+async function forceBTC() {
+  if (!confirm('Close any open position and switch to BTCUSDT immediately?')) return;
+  const r = await fetch('/instruction', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
+    body: JSON.stringify({action: 'FORCE_BTC', source: 'dashboard'}),
+  }).catch(() => null);
+  if (r && r.ok) {
+    const flash = document.createElement('div');
+    flash.textContent = '₿ Switching to BTC…';
+    flash.style.cssText = 'position:fixed;top:16px;right:20px;background:#f7931a;color:#000;padding:8px 18px;border-radius:6px;font-family:monospace;font-size:.8rem;font-weight:bold;z-index:9999';
+    document.body.appendChild(flash);
+    setTimeout(() => flash.remove(), 3000);
+  }
+}
+
 // ── Stop / Resume buttons ─────────────────────────────────
 let _halted = false;
 async function stopAgent() {
@@ -468,12 +612,118 @@ function syncHaltButtons(halt) {
   document.getElementById('start-btn').style.display = halt ? 'inline' : 'none';
 }
 
+// ── Market Scanner ────────────────────────────────────────
+function renderScanner(s) {
+  const rows = (s.scanner_ranked || []).slice(0, 4);
+  const best = s.scanner_best || '';
+  const active = s.symbol || '';
+  const ts = s.scanner_ts ? new Date(s.scanner_ts*1000).toISOString().slice(11,19)+' UTC' : '—';
+  document.getElementById('scanner-ts').textContent = 'last scan: ' + ts;
+  const tbody = document.getElementById('scanner-tbody');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="color:#555;padding:10px 8px">No scan data yet — runs every 60s</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((r,i) => {
+    const isBest   = r.symbol === best;
+    const isActive = r.symbol === active;
+    const bg       = isActive ? '#0a1f0a' : isBest ? '#0d1520' : '';
+    const badge    = isActive ? '<span style="background:#00e676;color:#000;padding:1px 6px;border-radius:3px;font-size:.6rem;margin-left:4px">TRADING</span>'
+                   : isBest   ? '<span style="background:#00b0ff;color:#000;padding:1px 6px;border-radius:3px;font-size:.6rem;margin-left:4px">NEXT</span>' : '';
+    const trendClr = r.trend && r.trend.includes('BULL') ? '#00e676' : r.trend && r.trend.includes('BEAR') ? '#ff1744' : '#888';
+    const chgClr   = r.chg_pct >= 0 ? '#00e676' : '#ff1744';
+    const regClr   = r.regime === 'TRENDING' ? '#00e676' : r.regime === 'VOLATILE' ? '#ff6d00' : '#888';
+    return `<tr style="border-bottom:1px solid #141414;background:${bg}">
+      <td style="padding:5px 8px;color:#555">${i+1}</td>
+      <td style="padding:5px 8px;font-weight:bold;color:#fff">${r.symbol.replace('USDT','')}${badge}</td>
+      <td style="padding:5px 8px;text-align:right;color:#ffd600">${r.score.toFixed(2)}</td>
+      <td style="padding:5px 8px;text-align:right;color:#82b1ff">${r.atr_pct ? r.atr_pct.toFixed(3)+'%' : '—'}</td>
+      <td style="padding:5px 8px;text-align:right;color:${chgClr}">${r.chg_pct >= 0 ? '+' : ''}${r.chg_pct}%</td>
+      <td style="padding:5px 8px;text-align:right;color:#aaa">$${r.vol_m}M</td>
+      <td style="padding:5px 8px;text-align:center;color:${trendClr}">${r.trend || '—'}</td>
+      <td style="padding:5px 8px;text-align:center;color:${regClr};font-weight:bold;font-size:.68rem">${r.regime || '—'}</td>
+      <td style="padding:5px 8px;text-align:center">
+        <button onclick="switchCoin('${r.symbol}')" style="background:#161616;color:#00e5ff;border:1px solid #00e5ff;padding:2px 8px;border-radius:3px;font-size:.65rem;cursor:pointer">Switch</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ── AI Usage Log ──────────────────────────────────────────
+async function loadAILog() {
+  try {
+    const r = await fetch('/api/ai-log');
+    const d = await r.json();
+    document.getElementById('ai-total-req').textContent  = d.total_requests.toLocaleString();
+    document.getElementById('ai-total-in').textContent   = d.total_input_tokens.toLocaleString();
+    document.getElementById('ai-total-out').textContent  = d.total_output_tokens.toLocaleString();
+    document.getElementById('ai-total-cost').textContent = '$' + d.total_cost_usd.toFixed(4);
+    const wrap = document.getElementById('ai-log-wrap');
+    if (!d.records || d.records.length === 0) {
+      wrap.innerHTML = '<span style="color:#555">No AI calls logged yet.</span>';
+      return;
+    }
+    const rows = [...d.records].reverse().map(r => {
+      const dt = new Date(r.ts * 1000).toISOString().replace('T',' ').slice(0,19);
+      const cost = '$' + (r.cost_usd || 0).toFixed(6);
+      return `<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px solid #1a1a1a">
+        <span style="color:#555;min-width:135px">${dt}</span>
+        <span style="color:#ffd600;min-width:90px">${r.purpose || '—'}</span>
+        <span style="color:#aaa;min-width:160px">${r.model || '—'}</span>
+        <span style="color:#82b1ff;min-width:70px">in:${(r.input_tokens||0).toLocaleString()}</span>
+        <span style="color:#82b1ff;min-width:70px">out:${(r.output_tokens||0).toLocaleString()}</span>
+        <span style="color:#00e676">${cost}</span>
+      </div>`;
+    }).join('');
+    wrap.innerHTML = rows;
+  } catch(e) {
+    document.getElementById('ai-log-wrap').innerHTML = `<span style="color:#ff6d6d">Error: ${e.message}</span>`;
+  }
+}
+
+// ── Binance Orders ────────────────────────────────────────
+async function loadOrders() {
+  document.getElementById('orders-refresh').textContent = '↻ loading…';
+  try {
+    const r = await fetch('/api/orders');
+    const d = await r.json();
+    const openWrap = document.getElementById('open-orders-wrap');
+    const histWrap = document.getElementById('order-history-wrap');
+    if (d.error) {
+      openWrap.innerHTML = `<span style="color:#ff6d6d">${d.error}</span>`;
+      histWrap.innerHTML = '';
+    } else {
+      openWrap.innerHTML = d.open.length
+        ? d.open.map(o => `<div style="border-bottom:1px solid #1a1a1a;padding:4px 0">
+            <span style="color:${o.side==='BUY'?'#00e676':'#ff1744'};font-weight:bold">${o.side}</span>
+            &nbsp;${o.qty} @ <span style="color:#00e5ff">${parseFloat(o.price)>0?'$'+parseFloat(o.price).toLocaleString():'MARKET'}</span>
+            &nbsp;<span style="color:#555">${o.status}</span>
+            &nbsp;<span style="color:#444;font-size:.62rem">#${o.id}</span>
+          </div>`).join('')
+        : '<span style="color:#555">No open orders</span>';
+      histWrap.innerHTML = d.history.length
+        ? d.history.map(o => `<div style="border-bottom:1px solid #1a1a1a;padding:4px 0">
+            <span style="color:#444;font-size:.62rem">${o.ts}</span>
+            &nbsp;<span style="color:${o.side==='BUY'?'#00e676':'#ff1744'};font-weight:bold">${o.side}</span>
+            &nbsp;${o.qty} @ <span style="color:#00e5ff">$${parseFloat(o.price).toLocaleString()}</span>
+            &nbsp;<span style="color:#555;font-size:.62rem">${o.status}</span>
+          </div>`).join('')
+        : '<span style="color:#555">No fills yet</span>';
+    }
+  } catch(e) { console.error('orders fetch:', e); }
+  document.getElementById('orders-refresh').textContent = '⟳ refresh';
+}
+
 // ── Boot ──────────────────────────────────────────────────
 initChart();
-renderCoinSelector([], 'auto');                              // show Auto button immediately on load
-refresh();                                                   // immediate first load
-connectSSE();                                               // then switch to real-time stream
-setInterval(() => { if (_currentSym) refreshChart(_currentSym); }, 10000); // full OHLCV refresh every 10s
+renderCoinSelector([], 'auto');
+refresh();
+connectSSE();
+loadOrders();
+loadAILog();
+setInterval(() => { if (_currentSym) refreshChart(_currentSym); }, 5000);
+setInterval(loadOrders, 30000);
+setInterval(loadAILog, 60000); // AI cost refreshes every 60s
 </script>
 </body>
 </html>
@@ -529,6 +779,16 @@ def update_open_pos(pos_info: dict | None):
     _state["open_pos"] = pos_info
 
 
+URGENT_ACTIONS = {"FORCE_BTC", "HALT", "CLOSE_ALL", "SWITCH_COIN", "RESUME_AUTO"}  # wake the main loop immediately
+
+# Module-level wake event — agent imports and awaits this during its sleep
+wake_event: asyncio.Event | None = None
+
+def set_wake_event(ev: asyncio.Event):
+    global wake_event
+    wake_event = ev
+
+
 class InstructionServer:
     def __init__(self, signal_queue: asyncio.Queue):
         self._queue = signal_queue
@@ -537,6 +797,8 @@ class InstructionServer:
         self._app.router.add_get("/api/stream",   self._stream)
         self._app.router.add_get("/api/state",    self._api_state)
         self._app.router.add_get("/api/chart",    self._chart)
+        self._app.router.add_get("/api/orders",   self._orders)
+        self._app.router.add_get("/api/ai-log",   self._ai_log)
         self._app.router.add_post("/instruction", self._handle)
         self._app.router.add_get("/status",       self._status)
 
@@ -565,6 +827,53 @@ class InstructionServer:
         sym  = request.query.get("symbol", _state.get("symbol", ""))
         data = _state.get("chart_data", {}).get(sym, {})
         return web.json_response(data)
+
+    async def _orders(self, request: web.Request) -> web.Response:
+        """Fetch open orders + recent fills directly from Binance."""
+        import hmac as _hmac, hashlib as _hs, time as _t
+        import aiohttp as _aio
+        import datetime as _dt
+        def _sign(params):
+            qs = "&".join(f"{k}={v}" for k, v in params.items())
+            return _hmac.new(cfg.BINANCE_API_SECRET.encode(), qs.encode(), _hs.sha256).hexdigest()
+        sym = _state.get("symbol", cfg.SYMBOL) or cfg.SYMBOL
+        hdrs = {"X-MBX-APIKEY": cfg.BINANCE_API_KEY}
+        result = {"open": [], "history": []}
+        try:
+            async with _aio.ClientSession(headers=hdrs) as s:
+                # Open orders
+                p = {"symbol": sym, "timestamp": int(_t.time()*1000), "recvWindow": 5000}
+                p["signature"] = _sign(p)
+                async with s.get(cfg.SPOT_BASE_URL + "/api/v3/openOrders", params=p) as r:
+                    r.raise_for_status()
+                    for o in await r.json():
+                        result["open"].append({
+                            "id": o["orderId"], "side": o["side"],
+                            "qty": o["origQty"], "filled": o["executedQty"],
+                            "price": o["price"], "status": o["status"],
+                            "ts": _dt.datetime.fromtimestamp(o["time"]//1000, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                        })
+                # Recent order history (last 20)
+                p2 = {"symbol": sym, "timestamp": int(_t.time()*1000), "recvWindow": 5000, "limit": 20}
+                p2["signature"] = _sign(p2)
+                async with s.get(cfg.SPOT_BASE_URL + "/api/v3/allOrders", params=p2) as r:
+                    r.raise_for_status()
+                    for o in reversed(await r.json()):
+                        if o["status"] not in ("FILLED", "PARTIALLY_FILLED"):
+                            continue
+                        fill_price = o.get("cummulativeQuoteQty", "0")
+                        exec_qty   = float(o.get("executedQty", 0))
+                        avg_price  = (float(fill_price) / exec_qty) if exec_qty else float(o["price"])
+                        result["history"].append({
+                            "id": o["orderId"], "side": o["side"],
+                            "qty": o["executedQty"],
+                            "price": f"{avg_price:.2f}",
+                            "status": o["status"],
+                            "ts": _dt.datetime.fromtimestamp(o["time"]//1000, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                        })
+        except Exception as e:
+            result["error"] = str(e)
+        return web.json_response(result)
 
     async def _dashboard(self, request: web.Request) -> web.Response:
         _mode_map = {
@@ -605,9 +914,18 @@ class InstructionServer:
             "qty_pct": float(body.get("qty_pct", 1.0)),
             "source":  body.get("source", "unknown"),
         }
-        log("INSTRUCTION_SERVER", "INSTRUCTION_RECEIVED", **instruction)
+        log("INSTRUCTION_SERVER", "INSTRUCTION_RECEIVED",
+            instr_action=instruction["action"], source=instruction["source"],
+            symbol=instruction.get("symbol"), qty_pct=instruction.get("qty_pct"))
         await self._queue.put(instruction)
+        # Wake the main loop immediately for urgent actions
+        if action in URGENT_ACTIONS and wake_event is not None:
+            wake_event.set()
         return web.json_response({"status": "queued", "action": action})
+
+    async def _ai_log(self, request: web.Request) -> web.Response:
+        from ai_logger import get_summary
+        return web.json_response(get_summary(last_n=50))
 
     async def _status(self, request: web.Request) -> web.Response:
         if not _auth(request):

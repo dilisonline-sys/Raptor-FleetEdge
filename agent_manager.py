@@ -348,6 +348,8 @@ class AgentManager:
         return web.Response(text=MANAGER_HTML, content_type="text/html")
 
     async def _list(self, _):
+        # Re-sync from state file on every list call — picks up PIDs updated externally
+        _load_state()
         result = []
         for name, info in list(_agents.items()):
             status = _agent_status(name)
@@ -386,6 +388,9 @@ class AgentManager:
         name = request.match_info["name"]
         path = request.match_info.get("path", "")
         info = _agents.get(name)
+        if not info or not _pid_alive(info.get("pid", 0)):
+            _load_state()   # re-sync from file before giving up
+            info = _agents.get(name)
         if not info or not _pid_alive(info.get("pid", 0)):
             return web.Response(text=f"Agent '{name}' is not running", status=503)
         port   = info["port"]

@@ -17,13 +17,13 @@ from market_data import MarketData
 from market_scanner import MarketScanner
 from sizing import PositionSizer
 from order_manager import OrderManager
-from exit_manager import ExitManager
+from exit_manager import ExitManager, Position
 from risk_engine import RiskEngine
 from regime import RegimeClassifier
 from sentiment import FearGreedClient
-from claude_analyst import ClaudeAnalyst
 from instruction_server import (InstructionServer, update_state, push_log,
-                                push_transaction, update_chart, update_open_pos, _state)
+                                push_transaction, update_chart, update_open_pos, _state,
+                                set_wake_event)
 from logger import log
 import config as cfg
 
@@ -44,56 +44,54 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
         log("SIGNAL", "EXTERNAL_OVERRIDE", signal=override)
         return override
 
-    if regime == "VOLATILE":
+    # Volatility chase strategy: momentum-only, skip RANGING entirely
+    if regime in ("VOLATILE", "RANGING"):
         return "NONE"
 
     e9, e21, e50 = ind["ema9"], ind["ema21"], ind["ema50"]
-    rsi   = ind["rsi14"]
-    macd  = ind["macd"]
-    msig  = ind["macd_signal"]
-    price = ind["close"]   # current close — VWAP is 200-candle average, wrong for EMA/BB comparisons
-    bb_lo = ind["bb_lower"]
-    bb_hi = ind["bb_upper"]
+    rsi        = ind["rsi14"]
+    macd       = ind["macd"]
+    msig       = ind["macd_signal"]
+    price      = ind["close"]
+    open_price = ind.get("open", price)
+    bb_lo      = ind["bb_lower"]
+    bb_hi      = ind["bb_upper"]
 
-    if regime == "TRENDING":
-        # Two valid entry setups in a trend:
-        # 1) Momentum entry: EMA bullish stack + MACD confirmed + price above EMA21
-        # 2) Pullback entry: EMA bullish stack + RSI deeply oversold (price can be below EMA21)
-        # Short equivalents are mirrored.
-        ema_bull = e9 > e21 > e50
-        ema_bear = e9 < e21 < e50
+    # TRENDING only — momentum-first on 15m candles
+    ema_bull = e9 > e21 > e50
+    ema_bear = e9 < e21 < e50
 
-        # Momentum entry: EMA aligned + MACD confirmed (RSI not at opposite extreme)
-        long_momentum  = ema_bull and rsi < 72   and macd > msig and price > e21
-        short_momentum = ema_bear and rsi > 28   and macd < msig and price < e21
+    # Candle body filter: current candle must be showing live momentum, not a stale crossover.
+    # Prevents entering one candle too late after a spike has already exhausted.
+    candle_body_pct = (price - open_price) / open_price * 100 if open_price else 0
+    candle_bull = candle_body_pct > 0.2   # at least 0.2% green candle body
+    candle_bear = candle_body_pct < -0.2  # at least 0.2% red candle body
 
-        # Pullback/continuation entry: EMA aligned + RSI at extreme (trend continuation)
-        # In a strong downtrend RSI can stay < 32 — that's a continuation, not a reversal
-        long_pullback  = ema_bull and rsi < 32   and price > e50
-        short_pullback = ema_bear and rsi < 35   and macd < msig  # oversold in downtrend → short continuation
+    # Primary momentum entry: EMA stack + MACD + price above/below EMA21 + live candle
+    long_momentum  = ema_bull and rsi < 70 and macd > msig and price > e21 and candle_bull
+    short_momentum = ema_bear and rsi > 30 and macd < msig and price < e21 and candle_bear
 
-        # Reversal BUY: oversold counter-trend entry even in downtrend.
-        # RSI < 40 + price within 1% of lower BB = dip-buy at statistical support.
-        # RSI < 25 triggers unconditionally (extreme crash oversold).
-        reversal_long = (rsi < 40 and price <= bb_lo * 1.01) or rsi < 25
+    # Continuation entry: deep pullback in confirmed bull trend only
+    # Disabled in bear — counter-trend pullbacks fail too quickly in downtrends
+    long_pullback  = ema_bull and rsi < 35 and price > e50
+    short_pullback = ema_bear and rsi > 65 and price < e50
 
-        long_signal  = long_momentum  or long_pullback or reversal_long
-        short_signal = short_momentum or short_pullback
+    # Extreme oversold BUY at lower BB support (bull trend only)
+    long_bb = price <= bb_lo * 1.003 and rsi < 32 and ema_bull
 
+    # Mean-reversion BUY: deeply oversold in bear trend — catch the bounce
+    # RSI < 28 (raised from 22): still rare but catches genuine capitulation bottoms
+    # Requires price at/below lower BB to confirm flush
+    bear_reversal = ema_bear and rsi < 28 and price <= bb_lo * 1.005
+
+    # In a bear trend: only allow bear_reversal (no long_pullback, no long_momentum)
+    # Counter-trend long entries in downtrends have low success rate in broad bear markets
+    if ema_bear:
+        long_signal = bear_reversal
     else:
-        # RANGING: e9/e21 relationship is enough (full stack too rare in a range)
-        long_signal  = e9 > e21 and 28 < rsi < 65 and macd > msig
-        short_signal = e9 < e21 and 35 < rsi < 72 and macd < msig
+        long_signal = long_momentum or long_pullback or long_bb
 
-    if regime == "RANGING":
-        # BB touch overrides (higher-conviction entry at range extremes)
-        if price <= bb_lo * 1.002 and rsi < 38:
-            long_signal  = True
-            short_signal = False
-        elif price >= bb_hi * 0.998 and rsi > 62:
-            short_signal = True
-            long_signal  = False
-        # no else-return-NONE: let EMA/MACD conditions above still fire
+    short_signal = short_momentum or short_pullback
 
     if long_signal:  return "BUY"
     if short_signal: return "SELL"
@@ -109,9 +107,10 @@ async def main_loop():
     em       = ExitManager()
     rc       = RegimeClassifier()
     fg       = FearGreedClient()
-    analyst  = ClaudeAnalyst()
-    queue    = asyncio.Queue()
-    server   = InstructionServer(queue)
+    queue      = asyncio.Queue()
+    _wake      = asyncio.Event()
+    server     = InstructionServer(queue)
+    set_wake_event(_wake)
 
     await server.start()
     await fg.connect()
@@ -120,8 +119,9 @@ async def main_loop():
     try:
         import aiohttp as _aio
         async with _aio.ClientSession() as _s:
+            _init_sym = "BTCUSDT" if cfg.TRADING_MODE == "live" else (os.environ.get("AGENT_SYMBOL", "BTCUSDT") or "BTCUSDT")
             async with _s.get("https://api.binance.com/api/v3/ticker/price",
-                               params={"symbol": os.environ.get("AGENT_SYMBOL", "BTCUSDT") or "BTCUSDT"},
+                               params={"symbol": _init_sym},
                                timeout=_aio.ClientTimeout(total=5)) as _r:
                 _init_price = float((await _r.json()).get("price", 0))
     except Exception:
@@ -155,9 +155,9 @@ async def main_loop():
                 price = (md._ws_ticker or {}).get("price", 0)
                 # Refresh raw balances from Binance API every 30s
                 if now - _last_fetch >= 30:
-                    _usdt, _base = await om.get_balances_raw(active_symbol)
+                    _usdt, _base, _ = await om.get_balances_raw(active_symbol)
                     _last_fetch  = now
-                # Revalue with live WS price
+                # _usdt = USDT + all other coins priced at REST; add active base at live WS price
                 if price > 0:
                     update_state(equity=round(_usdt + _base * price, 2))
             except Exception:
@@ -169,27 +169,101 @@ async def main_loop():
     _env_symbol = os.environ.get("AGENT_SYMBOL", "").upper().strip()
     _start_sym  = _env_symbol or cfg.SYMBOL
 
-    if cfg.USE_DEMO or cfg.USE_LIVE:
+    if cfg.USE_DEMO:
         active_symbol = _start_sym
-        update_state(coin_mode=active_symbol)  # lock coin_mode so auto-switch paths skip
+        update_state(coin_mode=active_symbol)  # demo locks to specified coin
+    elif cfg.TRADING_MODE == "live":
+        # Live: always start on BTC, locked until user clicks Trade Auto
+        active_symbol = "BTCUSDT"
+        update_state(coin_mode="BTCUSDT")
     else:
-        active_symbol = _start_sym if _env_symbol else await scanner.scan()
+        # Testnet: start on specified coin, auto-switch enabled
+        active_symbol = _start_sym
+        update_state(coin_mode="auto")
     md = MarketData(active_symbol, cfg.INTERVAL)
     await md.connect()
     asyncio.create_task(_price_pusher())
     asyncio.create_task(_equity_pusher())
 
+    async def _background_scanner():
+        """Independent background task — re-ranks all coins every 60s regardless of cycle."""
+        await asyncio.sleep(10)  # let agent settle first
+        while True:
+            try:
+                await scanner.scan(force=True)
+                ranked_data = [
+                    {
+                        "symbol":    r["symbol"],
+                        "score":     round(r.get("deep_score", 0), 3),
+                        "atr_pct":   round(r.get("atr_pct", 0), 3),
+                        "chg_pct":   round(r.get("chg_pct", 0), 2),
+                        "vol_m":     round(r.get("vol", 0) / 1_000_000, 1),
+                        "trend":     r.get("trend", "—"),
+                        "regime":    r.get("regime", "—"),
+                    }
+                    for r in scanner.ranked[:4]
+                ]
+                update_state(scanner_ranked=ranked_data,
+                             scanner_best=scanner.best_symbol,
+                             scanner_ts=round(_time.time()))
+                log("SCANNER", "BG_RANKED", best=scanner.best_symbol,
+                    top3=[r["symbol"] for r in scanner.ranked[:3]])
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                log("SCANNER", "BG_ERROR", error=str(e)[:80])
+            await asyncio.sleep(60)
+
+    asyncio.create_task(_background_scanner())
+
     pending_override:    str | None = None
+    pending_force_coin:  str | None = None  # force-switch target (closes position first)
     volatile_since:      float      = 0.0   # when current coin first entered VOLATILE
     gate_fail_streak:    int        = 0     # consecutive quality gate failures
     none_signal_streak:  int        = 0     # consecutive NONE-signal cycles (no trade setup)
     _ranked_idx:         int        = 0     # which scanner.ranked slot we're currently on
+    _orphan_checked:     bool       = False  # one-shot: recover orphaned base-asset positions on restart
+    _last_fill_time:     dict       = {}    # symbol → last fill timestamp (entry cooldown)
     VOLATILE_ESCAPE_SECS   = 1800          # 30 minutes
-    GATE_FAIL_SWITCH_AFTER = 5            # switch coin after 5 straight gate fails (~5 min)
+    GATE_FAIL_SWITCH_AFTER = 2            # switch coin after 2 straight gate fails (~10 min)
     NONE_SIGNAL_ROTATE     = 3            # rotate to next ranked coin after 3 NONE cycles (~3 min)
+
+    async def _cycle_sleep():
+        """Sleep one cycle, but wake immediately if _wake event is fired."""
+        _wake.clear()
+        try:
+            await asyncio.wait_for(_wake.wait(), timeout=cfg.CYCLE_SLEEP_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+        _wake.clear()
 
     log("AGENT", "READY", symbol=active_symbol, testnet=cfg.USE_TESTNET, equity=round(equity, 2))
     update_state(equity=equity, symbol=active_symbol)
+
+    # ── Pre-loop orphan sweep: find any unmanaged coin holdings ──────────────
+    try:
+        _all_held = await om.get_all_significant_balances(min_usdt_value=5.0)
+        if _all_held:
+            log("AGENT", "ORPHAN_SWEEP", coins=[c["asset"] for c in _all_held])
+            for _held in _all_held:
+                _asset  = _held["asset"]
+                _sym    = _asset + "USDT"
+                _qty    = _held["qty"]
+                _price  = _held["price"]
+                _val    = _held["usdt_value"]
+                # If we hold a coin that isn't the active symbol, switch to it
+                if _sym != active_symbol:
+                    push_log(f"[ORPHAN_SWEEP] Found {_qty:.4f} {_asset} (${_val:.2f}) — switching to {_sym}")
+                    log("AGENT", "ORPHAN_SWITCH", from_=active_symbol, to=_sym,
+                        asset=_asset, qty=round(_qty, 6), usdt_val=round(_val, 2))
+                    await md.close()
+                    active_symbol = _sym
+                    md = MarketData(active_symbol, cfg.INTERVAL)
+                    await md.connect()
+                    update_state(symbol=active_symbol)
+                push_log(f"[ORPHAN_SWEEP] {_asset}: qty={_qty:.4f}, ~${_val:.2f} — will recover on first cycle")
+    except Exception as _oe:
+        log("AGENT", "ORPHAN_SWEEP_ERROR", error=str(_oe))
 
     while True:
         try:
@@ -252,13 +326,23 @@ async def main_loop():
                         push_log(f"[COIN_SELECT] Cannot switch while position open — close first")
                 elif action in ("BUY", "SELL"):
                     pending_override = action
+                elif action == "FORCE_BTC":
+                    pending_force_coin = "BTCUSDT"
+                    if em.positions:
+                        pending_override = "SELL"  # close position this cycle
+                    push_log("[FORCE_BTC] Queued — will close position and switch to BTCUSDT (locked)")
+                    log("AGENT", "FORCE_BTC_QUEUED", current=active_symbol)
+                elif action == "RESUME_AUTO":
+                    update_state(coin_mode="auto")
+                    push_log("[RESUME_AUTO] Auto-scanner re-enabled — will switch to best coin next cycle")
+                    log("AGENT", "RESUME_AUTO", symbol=active_symbol)
             except asyncio.QueueEmpty:
                 pass
 
             # ── Halt check ───────────────────────────────────────
             if risk.halt_active():
                 log("AGENT", "HALTED", msg="Waiting for halt to lift")
-                await asyncio.sleep(60)
+                await _cycle_sleep()
                 continue
 
             # ── Dynamic symbol selection (no open position, auto mode only) ──
@@ -289,7 +373,7 @@ async def main_loop():
                 current_price = tick["price"]
             except Exception as e:
                 log("AGENT", "DATA_ERROR", symbol=active_symbol, error=str(e))
-                await asyncio.sleep(30)
+                await _cycle_sleep()
                 continue
 
             if not md.quality_gate(tick, book):
@@ -311,9 +395,32 @@ async def main_loop():
                     else:
                         push_log(f"[QUALITY_GATE] {gate_fail_streak} straight fails — manual mode, holding {active_symbol}")
                     gate_fail_streak = 0
-                await asyncio.sleep(30)
+                await _cycle_sleep()
                 continue
             gate_fail_streak = 0  # reset on pass
+
+            # ── Orphan recovery: reconstruct position from existing balance ──
+            if not _orphan_checked:
+                _orphan_checked = True
+                _fu, _bb, _ = await om.get_balances_raw(active_symbol)
+                _min_notional = 10.0 / current_price
+                if _bb > _min_notional and not em.positions:
+                    _atr = indicators["atr14"]
+                    _sp  = Position(
+                        side="BUY", avg_entry=current_price, qty=_bb,
+                        stop=round(current_price - _atr * cfg.ATR_STOP_MULT, 2),
+                        tp1=round(current_price + _atr * cfg.ATR_STOP_MULT * cfg.TP1_R,  2),
+                        tp2=round(current_price + _atr * cfg.ATR_STOP_MULT * cfg.TP2_R,  2),
+                        tp3=round(current_price + _atr * cfg.ATR_STOP_MULT * cfg.TP3_R,  2),
+                        initial_risk=round(_bb * _atr * cfg.ATR_STOP_MULT, 4),
+                        symbol=active_symbol,
+                    )
+                    em.positions.append(_sp)
+                    push_log(f"[RECOVERY] Orphaned {round(_bb,6)} {active_symbol[:-4]} detected "
+                             f"— synthetic position created at {current_price:.2f} "
+                             f"| stop={_sp.stop} | tp1={_sp.tp1}")
+                    log("AGENT", "ORPHAN_RECOVERY", symbol=active_symbol,
+                        qty=round(_bb, 6), price=current_price, stop=_sp.stop, tp1=_sp.tp1)
 
             # ── Push chart data ───────────────────────────────────
             try:
@@ -354,6 +461,29 @@ async def main_loop():
             push_log(f"[CYCLE] {active_symbol} | price={current_price:.4f} | regime={regime} "
                      f"| RSI={indicators['rsi14']:.1f} | EMA9={indicators['ema9']:.4f}")
 
+            # ── RANGING: immediately rotate to the next best ranked coin ─────
+            if regime == "RANGING" and not em.positions:
+                coin_mode = _state.get("coin_mode", "auto")
+                if coin_mode == "auto" and scanner.ranked:
+                    _ranked_idx = (_ranked_idx + 1) % len(scanner.ranked)
+                    next_sym    = scanner.ranked[_ranked_idx]["symbol"]
+                    if next_sym != active_symbol:
+                        push_log(f"[RANGING_ESCAPE] {active_symbol} is RANGING — rotating to {next_sym}")
+                        log("AGENT", "RANGING_ESCAPE", from_=active_symbol, to=next_sym,
+                            idx=_ranked_idx)
+                        await md.close()
+                        active_symbol      = next_sym
+                        md                 = MarketData(active_symbol, cfg.INTERVAL)
+                        await md.connect()
+                        update_state(symbol=active_symbol)
+                        none_signal_streak = 0
+                    else:
+                        push_log(f"[RANGING_ESCAPE] {active_symbol} RANGING — no better coin available, sitting out")
+                else:
+                    push_log(f"[RANGING] {active_symbol} is RANGING — manual mode or no scanner data, sitting out")
+                await _cycle_sleep()
+                continue
+
             # ── Volatile escape: switch coin after 30 min of VOLATILE ─
             if regime == "VOLATILE":
                 if volatile_since == 0.0:
@@ -382,7 +512,7 @@ async def main_loop():
                     else:
                         push_log(f"[VOLATILE_ESCAPE] {active_symbol} volatile for {mins}m — manual mode, holding")
                     volatile_since = 0.0
-                    await asyncio.sleep(60)
+                    await _cycle_sleep()
                     continue
             else:
                 volatile_since = 0.0  # reset counter when regime clears
@@ -456,30 +586,75 @@ async def main_loop():
                         await md.connect()
                         update_state(symbol=active_symbol)
                         none_signal_streak = 0
-                    await asyncio.sleep(60)
+                    await _cycle_sleep()
                     continue
 
-            # ── Claude thesis (async, non-blocking) ───────────────
-            thesis = await analyst.analyze(
-                active_symbol, indicators, regime, fear_greed, signal
-            )
-            if thesis:
-                update_state(claude_thesis=thesis)
-                push_log(f"[CLAUDE] {thesis[:120]}")
+            # Manual SELL override — close the open position immediately
+            if signal == "SELL" and em.positions:
+                base_bal = await om.get_base_balance(active_symbol)
+                if base_bal > 0:
+                    close_order = await om.submit("SELL", base_bal, tick, indicators,
+                                                  symbol=active_symbol)
+                    if close_order:
+                        em.positions.clear()
+                        push_log(f"[MANUAL_SELL] Closed {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
+                        log("AGENT", "MANUAL_SELL_EXECUTED", symbol=active_symbol,
+                            qty=round(base_bal, 6), price=current_price)
+                else:
+                    push_log(f"[MANUAL_SELL] No {active_symbol[:-4]} balance to sell")
+                    em.positions.clear()
+
+            # Force-switch after position is closed (e.g. FORCE_BTC)
+            if pending_force_coin and not em.positions:
+                target = pending_force_coin
+                pending_force_coin = None
+                if target != active_symbol:
+                    push_log(f"[FORCE_SWITCH] {active_symbol} → {target}")
+                    log("AGENT", "FORCE_SWITCH", from_=active_symbol, to=target)
+                    await md.close()
+                    active_symbol = target
+                    md = MarketData(active_symbol, cfg.INTERVAL)
+                    await md.connect()
+                    update_state(symbol=active_symbol, coin_mode=active_symbol)  # lock to target; use RESUME_AUTO to release
+                    none_signal_streak = 0
+                await _cycle_sleep()
+                continue
 
             # Spot mode: only BUY can open a new position (no naked short selling)
             if signal == "BUY" and not em.positions:
-                free_usdt, _ = await om.get_balances_raw(active_symbol)
-                equity = free_usdt + _ * current_price  # recompute from raw balances
+                import time as _t
+                _now = _t.time()
+                ENTRY_COOLDOWN = 30 * 60  # 30 min no re-entry same symbol after a fill
+                _last_fill = _last_fill_time.get(active_symbol, 0)
+                if _now - _last_fill < ENTRY_COOLDOWN:
+                    _wait = int(ENTRY_COOLDOWN - (_now - _last_fill)) // 60
+                    push_log(f"[COOLDOWN] {active_symbol} — {_wait}m left before re-entry allowed")
+                    signal = "NONE"
+
+            if signal == "BUY" and not em.positions:
+                usdt_equiv, base_bal, raw_usdt = await om.get_balances_raw(active_symbol)
+                equity = usdt_equiv + base_bal * current_price  # full equity (includes BTC)
+                stop_d = indicators["atr14"] * cfg.ATR_STOP_MULT
+                tp1_dist = stop_d * cfg.TP1_R  # TP1 distance from entry
+                min_tp_dist = current_price * 0.0022  # 0.22% = round-trip fees (2×0.1%) + 0.02% margin
+                if tp1_dist < min_tp_dist:
+                    push_log(f"[SKIP] {active_symbol} TP1 too close ({tp1_dist/current_price*100:.3f}%) — won't cover fees")
+                    signal = "NONE"
+
+            if signal == "BUY" and not em.positions:
+                usdt_equiv, base_bal, raw_usdt = await om.get_balances_raw(active_symbol)
+                equity = usdt_equiv + base_bal * current_price  # full equity (includes BTC)
                 stop_d = indicators["atr14"] * cfg.ATR_STOP_MULT
                 qty    = PositionSizer.calculate(equity, current_price, stop_d, size_mult,
-                                                 usdt_available=free_usdt)
+                                                 usdt_available=raw_usdt)  # spend only real USDT
 
                 if qty:
                     order = await om.submit("BUY", qty, tick, indicators,
                                             symbol=active_symbol)
 
                     if order:
+                        import time as _t
+                        _last_fill_time[active_symbol] = _t.time()
                         push_log(f"[TRADE] BUY {active_symbol} qty={round(qty,5)} @ ~{current_price:.4f}")
                         pos = em.attach_exits(order, indicators, symbol=active_symbol)
                         if pos:
@@ -510,18 +685,29 @@ async def main_loop():
             if em.positions:
                 pos = em.positions[0]
                 pnl_pct = (current_price - pos.avg_entry) / pos.avg_entry * 100
+                update_open_pos({
+                    "side":      pos.side,
+                    "avg_entry": pos.avg_entry,
+                    "stop":      pos.stop,
+                    "tp1":       pos.tp1,
+                    "tp2":       pos.tp2,
+                    "qty":       pos.qty,
+                })
+                update_state(positions=len(em.positions))
                 push_log(
                     f"[STATUS] {active_symbol} | price={current_price:.2f} | entry={pos.avg_entry:.2f} "
                     f"| pnl={pnl_pct:+.2f}% | stop={pos.stop:.2f} | tp1={pos.tp1:.2f} "
                     f"| equity={round(equity,2)} | halt={risk.halt_flag}"
                 )
             else:
+                update_open_pos(None)
+                update_state(positions=0)
                 push_log(
                     f"[STATUS] {active_symbol} | price={current_price:.2f} | no open position "
                     f"| signal={signal} | regime={regime} | equity={round(equity,2)}"
                 )
 
-            await asyncio.sleep(60)
+            await _cycle_sleep()
 
         except KeyboardInterrupt:
             log("AGENT", "SHUTDOWN", reason="KeyboardInterrupt")
@@ -533,7 +719,7 @@ async def main_loop():
             sys.exit(0)
         except Exception as e:
             log("AGENT", "LOOP_ERROR", error=str(e))
-            await asyncio.sleep(30)
+            await _cycle_sleep()
 
 
 if __name__ == "__main__":
