@@ -165,7 +165,7 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 <div class="chart-wrap">
   <div class="chart-header">
     <span class="chart-sym" id="chart-sym-label">—</span>
-    <span class="chart-meta" id="chart-meta">1s live candles · EMA 9/21 overlay · entry / stop / TP levels</span>
+    <span class="chart-meta" id="chart-meta">15m candles · live-ticked every second · EMA 9/21 · entry / stop / TP</span>
   </div>
   <div id="chart"></div>
   <div class="legend">
@@ -294,12 +294,8 @@ let _currentSym  = '';
 let _lastOpenPos = null;
 let _coinMode    = 'auto';   // 'auto' | 'BTCUSDT' etc.
 let _topCoins    = [];       // last known top coins list
-// ── 1-second live candle state ────────────────────────────
-const MAX_1S_BARS   = 500;   // ~8 min of 1s bars visible
-let _live1sBars    = [];     // circular history of closed 1s candles
-let _cur1sBar      = null;   // currently building 1s candle
-let _cur1sTime     = 0;      // epoch-second of current bar
-let _lastChartTs   = 0;      // tracks chart_ts from SSE (triggers EMA overlay refresh)
+let _lastCandle  = null;     // current building 15m candle — ticked every second from SSE
+let _lastChartTs = 0;        // tracks chart_ts from SSE — triggers reload when agent cycle completes
 
 // ── Chart init ────────────────────────────────────────────
 function initChart() {
@@ -317,9 +313,10 @@ function initChart() {
     upColor: '#00e676', downColor: '#ff1744',
     borderUpColor: '#00e676', borderDownColor: '#ff1744',
     wickUpColor: '#00e676', wickDownColor: '#ff1744',
+    priceFormat: { type: 'price', precision: 5, minMove: 0.00001 },
   });
-  ema9Series  = chart.addLineSeries({ color: '#00e5ff', lineWidth: 1, priceLineVisible: false });
-  ema21Series = chart.addLineSeries({ color: '#ffd600', lineWidth: 1, priceLineVisible: false });
+  ema9Series  = chart.addLineSeries({ color: '#00e5ff', lineWidth: 1, priceLineVisible: false, priceFormat: { type: 'price', precision: 5, minMove: 0.00001 } });
+  ema21Series = chart.addLineSeries({ color: '#ffd600', lineWidth: 1, priceLineVisible: false, priceFormat: { type: 'price', precision: 5, minMove: 0.00001 } });
   window.addEventListener('resize', () => chart.applyOptions({ width: el.clientWidth }));
 }
 
@@ -350,49 +347,31 @@ function updatePosLines(pos) {
 // Browser local timezone offset in seconds (e.g. GMT+4 → +14400)
 const TZ_OFFSET = -new Date().getTimezoneOffset() * 60;
 
-// ── 1-second live candle engine ───────────────────────────
-function tick1s(price) {
-  if (!candleSeries) return;
-  const nowSec = Math.floor(Date.now() / 1000) + TZ_OFFSET;  // local epoch-second
-  if (!_cur1sBar || nowSec > _cur1sTime) {
-    // Close current bar into history
-    if (_cur1sBar) {
-      _live1sBars.push({..._cur1sBar});
-      if (_live1sBars.length > MAX_1S_BARS) {
-        _live1sBars.shift();
-        candleSeries.setData([..._live1sBars, _cur1sBar]);
-      } else {
-        try { candleSeries.update(_cur1sBar); } catch(e) {}
-      }
-    }
-    // Open new 1s bar
-    _cur1sTime = nowSec;
-    _cur1sBar  = { time: nowSec, open: price, high: price, low: price, close: price };
-    // If chart is empty, seed with history so it doesn't start blank
-    if (_live1sBars.length === 0) {
-      try { candleSeries.setData([_cur1sBar]); } catch(e) {}
-    }
-  } else {
-    _cur1sBar.high  = Math.max(_cur1sBar.high, price);
-    _cur1sBar.low   = Math.min(_cur1sBar.low,  price);
-    _cur1sBar.close = price;
-  }
-  try { candleSeries.update(_cur1sBar); } catch(e) {}
-  updatePosLines(_lastOpenPos);
-}
-
-// ── EMA overlay — loaded from agent's 15m data, shifted to local time ────
-async function refreshEMAOverlay(sym) {
+// ── Chart: load 15m historical candles + live-tick current bar ───────────
+async function refreshChart(sym) {
   if (!sym || sym === '—') return;
   try {
     const r  = await fetch('/api/chart?symbol=' + encodeURIComponent(sym));
     if (!r.ok) return;
     const cd = await r.json();
-    if (!cd) return;
+    if (!cd || !cd.candles || !cd.candles.length) return;
+    const shiftC = c => ({...c, time: c.time + TZ_OFFSET});
     const shiftV = v => ({...v, time: v.time + TZ_OFFSET});
+    candleSeries.setData(cd.candles.map(shiftC));
+    // Anchor the live candle to the current 15m bar boundary (local time)
+    const last    = cd.candles[cd.candles.length - 1];
+    const barTime = Math.floor((Date.now() / 1000 + TZ_OFFSET) / 900) * 900;
+    _lastCandle = {
+      time:  Math.max(last.time + TZ_OFFSET, barTime),
+      open:  barTime > last.time + TZ_OFFSET ? last.close : last.open,
+      high:  barTime > last.time + TZ_OFFSET ? last.close : last.high,
+      low:   barTime > last.time + TZ_OFFSET ? last.close : last.low,
+      close: last.close,
+    };
     if (cd.ema9  && cd.ema9.length)  ema9Series.setData(cd.ema9.map(shiftV));
     if (cd.ema21 && cd.ema21.length) ema21Series.setData(cd.ema21.map(shiftV));
-  } catch(e) { console.error('ema fetch:', e); }
+    updatePosLines(_lastOpenPos);
+  } catch(e) { console.error('chart fetch:', e); }
 }
 
 // ── Real-time SSE stream ──────────────────────────────────
@@ -409,23 +388,39 @@ function connectSSE() {
       renderScanner(s);
       syncHaltButtons(s.halt || false);
       renderAnalyst(s);
-      // On symbol switch: clear 1s candle state and reload EMA overlay
+      // On symbol switch or new chart data: reload historical candles
       const sym = s.symbol || '';
       if (sym && sym !== _currentSym) {
         _currentSym = sym;
-        _live1sBars = []; _cur1sBar = null; _cur1sTime = 0;
-        if (candleSeries) candleSeries.setData([]);
-        if (ema9Series)   ema9Series.setData([]);
-        if (ema21Series)  ema21Series.setData([]);
+        _lastCandle = null;
         _lastChartTs = s.chart_ts || 0;
-        refreshEMAOverlay(sym);
+        refreshChart(sym);
       } else if (s.chart_ts && s.chart_ts !== _lastChartTs) {
-        // Agent cycle completed — refresh EMA lines with fresh 15m data
         _lastChartTs = s.chart_ts;
-        refreshEMAOverlay(sym);
+        refreshChart(sym);
       }
-      // Build 1-second live candles from every SSE price tick
-      if (s.price && s.price > 0) tick1s(s.price);
+      // Live-tick the rightmost candle every second from SSE price
+      if (s.price && s.price > 0 && candleSeries) {
+        const p = s.price;
+        if (!_lastCandle) {
+          if (sym) refreshChart(sym);
+        } else {
+          const barTime = Math.floor((Date.now() / 1000 + TZ_OFFSET) / 900) * 900;
+          if (barTime > _lastCandle.time) {
+            _lastCandle = { time: barTime, open: p, high: p, low: p, close: p };
+          } else {
+            _lastCandle = {
+              time:  _lastCandle.time,
+              open:  _lastCandle.open,
+              high:  Math.max(_lastCandle.high, p),
+              low:   Math.min(_lastCandle.low,  p),
+              close: p,
+            };
+          }
+          try { candleSeries.update(_lastCandle); } catch(e) { console.warn('chart tick:', e); }
+        }
+        updatePosLines(_lastOpenPos);
+      }
       sseRetries = 0;
       document.getElementById('sse-status').textContent = '● live';
       document.getElementById('sse-status').style.color = '#00e676';
@@ -451,7 +446,7 @@ async function refresh() {
     renderTx(s.transactions || []);
     renderLog(s.last_log || []);
     renderScanner(s);
-    if (_currentSym) refreshEMAOverlay(_currentSym);
+    if (_currentSym) refreshChart(_currentSym);
   } catch(e) { console.error(e); }
 }
 
@@ -514,7 +509,7 @@ function renderCards(s) {
   document.getElementById('chart-sym-label').textContent = (s.symbol||'—') + ' · ' + (s.interval||'1H');
   // Update Buy/Sell button labels with live price
   if (s.price && s.price > 0) {
-    const priceStr = s.price < 0.01 ? s.price.toFixed(6) : s.price < 1 ? s.price.toFixed(4) : s.price.toFixed(2);
+    const priceStr = s.price.toFixed(5);
     const buyBtn  = document.getElementById('btn-buy');
     const sellBtn = document.getElementById('btn-sell');
     if (buyBtn)  buyBtn.textContent  = '▲ Buy @ ' + priceStr;
@@ -570,11 +565,11 @@ function renderTx(txs) {
       <td class="${sideCls}">${t.side||''}</td>
       <td>${t.symbol||''}</td>
       <td class="num">${t.qty||''}</td>
-      <td class="num">${t.price ? parseFloat(t.price).toLocaleString('en',{minimumFractionDigits:2}) : '—'}</td>
-      <td class="num">${t.stop  ? parseFloat(t.stop ).toFixed(2) : '—'}</td>
-      <td class="num">${t.tp1   ? parseFloat(t.tp1  ).toFixed(2) : '—'}</td>
-      <td class="num">${t.tp2   ? parseFloat(t.tp2  ).toFixed(2) : '—'}</td>
-      <td class="num">${t.risk  ? parseFloat(t.risk ).toFixed(2) : '—'}</td>
+      <td class="num">${t.price ? parseFloat(t.price).toFixed(5) : '—'}</td>
+      <td class="num">${t.stop  ? parseFloat(t.stop ).toFixed(5) : '—'}</td>
+      <td class="num">${t.tp1   ? parseFloat(t.tp1  ).toFixed(5) : '—'}</td>
+      <td class="num">${t.tp2   ? parseFloat(t.tp2  ).toFixed(5) : '—'}</td>
+      <td class="num">${t.risk  ? parseFloat(t.risk ).toFixed(5) : '—'}</td>
       <td class="num ${pnlCls}">${pnlStr}</td>
       <td>${t.status||''}</td>
     </tr>`;
@@ -877,7 +872,7 @@ refresh();
 connectSSE();
 loadOrders();
 loadAILog();
-setInterval(() => { if (_currentSym) refreshEMAOverlay(_currentSym); }, 60 * 1000); // fallback EMA refresh every 60s
+setInterval(() => { if (_currentSym) refreshChart(_currentSym); }, 60 * 1000); // fallback chart refresh every 60s
 setInterval(loadOrders, 30000);
 setInterval(loadAILog, 60000); // AI cost refreshes every 60s
 </script>
