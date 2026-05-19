@@ -135,11 +135,15 @@ class ExitManager:
                     log("MODULE_5", "TP2_HIT", price=current_price, remaining_qty=round(pos.qty, 5))
                     actions.append(f"PARTIAL_CLOSE:{pos.side}:TP2")
 
-            # Time exit
+            # Time exit: exit if flat/losing after max_hours; extend if trade is winning.
+            # Winning trades get up to 2× the time limit — let profits run, cut deadweight.
             hours_held = (time.time() - pos.entry_ts) / 3600
             max_hours  = cfg.MAX_TRADE_HOURS_FUTURES
-            if hours_held > max_hours and r_multiple < 0.5:
-                log("MODULE_5", "TIME_EXIT_TRIGGERED", hours=round(hours_held, 1), r=round(r_multiple, 2))
+            is_winning = r_multiple >= 0.5  # at least halfway to TP1
+            effective_max = max_hours * 2 if is_winning else max_hours
+            if hours_held > effective_max:
+                log("MODULE_5", "TIME_EXIT_TRIGGERED", hours=round(hours_held, 1),
+                    r=round(r_multiple, 2), winning=is_winning)
                 _push_tx(pos, current_price, "TIME_EXIT")
                 self.positions.remove(pos)
                 actions.append(f"CLOSE:{pos.side}:TIME")
