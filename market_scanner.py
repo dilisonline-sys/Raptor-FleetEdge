@@ -46,41 +46,90 @@ class MarketScanner:
             return await r.json()
 
     async def _quick_rank(self) -> list[dict]:
-        """Fetch all 24hr tickers and rank by quick score, pre-filtering by spread."""
-        tickers = await self._get("/api/v3/ticker/24hr")
-        candidates = []
-        for t in tickers:
+        """Rank coins by 1-hour momentum.
+
+        Step 1 — 24hr ticker: universe filter (volume, spread, valid symbol).
+        Step 2 — 1h rolling ticker for the shortlist: re-score by 1h change + 1h volume.
+        This surfaces coins that have actually moved in the last hour, not just the last day.
+        """
+        import json as _json
+
+        # ── Step 1: 24hr ticker for universe filtering ────────────────
+        tickers_24h = await self._get("/api/v3/ticker/24hr")
+        pre = []
+        for t in tickers_24h:
             sym = t.get("symbol", "")
             if not sym.endswith("USDT") or sym in BLACKLIST or not _is_valid_symbol(sym):
                 continue
             try:
                 vol       = float(t["quoteVolume"])
-                chg       = abs(float(t["priceChangePercent"]))
                 price     = float(t["lastPrice"])
-                high      = float(t["highPrice"])
-                low       = float(t["lowPrice"])
                 bid_price = float(t.get("bidPrice") or price)
                 ask_price = float(t.get("askPrice") or price)
-                if vol < MIN_VOLUME_USDT or chg < MIN_PRICE_CHG or price <= 0:
+                if vol < MIN_VOLUME_USDT or price <= 0:
                     continue
-                # Pre-filter: spread must be below MAX_SPREAD_PCT
-                mid_p = (bid_price + ask_price) / 2
+                mid_p      = (bid_price + ask_price) / 2
                 spread_pct = (ask_price - bid_price) / mid_p * 100 if mid_p else 99
                 if spread_pct > MAX_SPREAD_PCT:
                     continue
-                range_ratio  = (high - low) / price if price else 0
-                quick_score  = chg * (vol / 1e8) * range_ratio
+                pre.append({"symbol": sym, "price": price, "spread_pct": spread_pct,
+                             "vol_24h": vol})
+            except (ValueError, KeyError):
+                continue
+
+        if not pre:
+            return []
+
+        # ── Step 2: 1h rolling ticker for the shortlist ───────────────
+        # Limit to top 80 by 24h volume to keep the batch call small.
+        # Build URL manually — aiohttp's params dict doesn't reliably encode JSON arrays
+        # for Binance's symbols parameter.
+        import urllib.parse as _up
+        pre.sort(key=lambda x: x["vol_24h"], reverse=True)
+        batch    = pre[:80]
+        sym_json = _json.dumps([c["symbol"] for c in batch], separators=(',', ':'))
+        url_1h   = (cfg.PUBLIC_DATA_URL + "/api/v3/ticker"
+                    + "?windowSize=1h&symbols=" + _up.quote(sym_json))
+        try:
+            await self._ensure_session()
+            async with self._session.get(url_1h) as r1h:
+                r1h.raise_for_status()
+                tickers_1h = await r1h.json()
+            by_sym = {t["symbol"]: t for t in (tickers_1h if isinstance(tickers_1h, list) else [])}
+        except Exception as e:
+            log("SCANNER", "1H_FETCH_ERROR", error=str(e)[:80])
+            by_sym = {}
+
+        # ── Step 3: score by 1h change × 1h volume × 1h range ────────
+        candidates = []
+        for c in batch:
+            sym  = c["symbol"]
+            t1h  = by_sym.get(sym)
+            if not t1h:
+                continue
+            try:
+                chg_1h  = abs(float(t1h["priceChangePercent"]))
+                vol_1h  = float(t1h["quoteVolume"])
+                high_1h = float(t1h["highPrice"])
+                low_1h  = float(t1h["lowPrice"])
+                price   = float(t1h["lastPrice"]) or c["price"]
+                # Require at least 0.3% 1h move and $500K 1h volume
+                if chg_1h < 0.3 or vol_1h < 500_000:
+                    continue
+                range_1h    = (high_1h - low_1h) / price if price else 0
+                quick_score = chg_1h * (vol_1h / 1e7) * range_1h
                 candidates.append({
                     "symbol":     sym,
-                    "vol":        vol,
-                    "chg_pct":    chg,
+                    "vol":        vol_1h,
+                    "chg_pct":    chg_1h,
                     "price":      price,
-                    "spread_pct": spread_pct,
-                    "range_ratio":range_ratio,
+                    "spread_pct": c["spread_pct"],
+                    "range_ratio":range_1h,
                     "quick_score":quick_score,
                 })
             except (ValueError, KeyError):
                 continue
+
         candidates.sort(key=lambda x: x["quick_score"], reverse=True)
         log("SCANNER", "QUICK_RANK", candidates=len(candidates),
             top3=[c["symbol"] for c in candidates[:3]])
