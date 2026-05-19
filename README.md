@@ -346,7 +346,7 @@ curl -X POST http://localhost:7430/api/email-pnl
 
 ### Using other SMTP providers
 
-The default is Gmail (`smtp.gmail.com:587`). To use another provider, POST the `smtp_host` and `smtp_port` fields in the config call above.
+The default is Gmail on port **465 (SSL)**. Port 587 (STARTTLS) is also supported — set `smtp_port` to `587` if your network requires it. For non-Gmail providers, set `smtp_host` and `smtp_port` in the config call above.
 
 ---
 
@@ -434,6 +434,7 @@ Before switching to `TRADING_MODE=live`:
 | `regime.py` | TRENDING / RANGING / VOLATILE classification |
 | `equity_pool.py` | Shared pool — prevents sibling agents picking the same coin |
 | `ai_analyst.py` | Claude Haiku advisory analyst |
+| `email_notifier.py` | Email alerts — fills, rotations, 4h P&L reports |
 | `instruction_server.py` | Per-agent HTTP dashboard and instruction endpoint |
 | `config.py` | All parameters in one place |
 
