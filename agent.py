@@ -28,6 +28,7 @@ from instruction_server import (InstructionServer, update_state, push_log,
                                 set_wake_event)
 from logger import log
 import config as cfg
+import email_notifier as _email
 import equity_pool as _ep
 from ai_analyst import AIAnalyst
 
@@ -184,8 +185,9 @@ async def main_loop():
     rc       = RegimeClassifier()
     fg       = FearGreedClient()
     analyst  = AIAnalyst()
-    queue      = asyncio.Queue()
+    queue       = asyncio.Queue()
     _agent_slot = int(os.environ.get("AGENT_SLOT", "0"))
+    _agent_name = os.environ.get("AGENT_NAME", f"dipu-slot{_agent_slot}")
     _wake      = asyncio.Event()
     server     = InstructionServer(queue)
     set_wake_event(_wake)
@@ -525,6 +527,8 @@ async def main_loop():
                 if new_symbol != active_symbol:
                     push_log(f"[SWITCH] {active_symbol} → {new_symbol} | top5={top5}")
                     log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol, top5=top5)
+                    asyncio.create_task(asyncio.to_thread(
+                        _email.notify_rotation, _agent_name, active_symbol, new_symbol, "scanner pick"))
                     await _liquidate_before_switch(active_symbol)
                     await md.close()
                     active_symbol = new_symbol
@@ -559,6 +563,8 @@ async def main_loop():
                         log("AGENT", "GATE_FAIL_SWITCH", symbol=active_symbol, streak=gate_fail_streak)
                         new_symbol = await scanner.scan(exclude={active_symbol}, force=True)
                         if new_symbol != active_symbol:
+                            asyncio.create_task(asyncio.to_thread(
+                                _email.notify_rotation, _agent_name, active_symbol, new_symbol, "quality gate escape"))
                             await _liquidate_before_switch(active_symbol)
                             await md.close()
                             active_symbol = new_symbol
@@ -677,6 +683,8 @@ async def main_loop():
                         push_log(f"[RANGING_ESCAPE] {active_symbol} is RANGING — rotating to {next_sym}")
                         log("AGENT", "RANGING_ESCAPE", from_=active_symbol, to=next_sym,
                             idx=_ranked_idx)
+                        asyncio.create_task(asyncio.to_thread(
+                            _email.notify_rotation, _agent_name, active_symbol, next_sym, "ranging escape"))
                         await _liquidate_before_switch(active_symbol)
                         await md.close()
                         active_symbol      = next_sym
@@ -713,6 +721,8 @@ async def main_loop():
                             push_log(f"[SWITCH] {active_symbol} → {new_symbol} (volatile escape)")
                             log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol,
                                 reason="volatile_escape")
+                            asyncio.create_task(asyncio.to_thread(
+                                _email.notify_rotation, _agent_name, active_symbol, new_symbol, "volatile escape"))
                             await _liquidate_before_switch(active_symbol)
                             await md.close()
                             active_symbol = new_symbol
@@ -740,6 +750,8 @@ async def main_loop():
                                                       symbol=active_symbol)
                         if close_order:
                             push_log(f"[EXIT_EXECUTED] SELL {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
+                            asyncio.create_task(asyncio.to_thread(
+                                _email.notify_fill, _agent_name, active_symbol, "SELL", base_bal, current_price))
                 elif act.startswith("PARTIAL_CLOSE:BUY:TP1"):
                     # Sell TP1_PCT of the position
                     base_bal = await om.get_base_balance(active_symbol)
@@ -749,6 +761,8 @@ async def main_loop():
                                                    symbol=active_symbol)
                         if tp_order:
                             push_log(f"[TP1_EXECUTED] SELL {active_symbol} qty={round(sell_qty,6)} @ ~{current_price:.4f}")
+                            asyncio.create_task(asyncio.to_thread(
+                                _email.notify_fill, _agent_name, active_symbol, "SELL (TP1)", sell_qty, current_price))
                 elif act.startswith("PARTIAL_CLOSE:BUY:TP2"):
                     base_bal = await om.get_base_balance(active_symbol)
                     sell_qty = base_bal * cfg.TP2_PCT / (1 - cfg.TP2_PCT + cfg.TP2_PCT)
@@ -757,6 +771,8 @@ async def main_loop():
                                                    symbol=active_symbol)
                         if tp_order:
                             push_log(f"[TP2_EXECUTED] SELL {active_symbol} qty={round(sell_qty,6)} @ ~{current_price:.4f}")
+                            asyncio.create_task(asyncio.to_thread(
+                                _email.notify_fill, _agent_name, active_symbol, "SELL (TP2)", sell_qty, current_price))
 
             # Update open position overlay
             if em.positions:
@@ -809,6 +825,8 @@ async def main_loop():
                         push_log(f"[ROTATE] {active_symbol}: {_rotate_reason} — switching to {next_sym}")
                         log("AGENT", "SIGNAL_ROTATE", from_=active_symbol, to=next_sym,
                             streak=none_signal_streak, idx=_ranked_idx)
+                        asyncio.create_task(asyncio.to_thread(
+                            _email.notify_rotation, _agent_name, active_symbol, next_sym, _rotate_reason))
                         await _liquidate_before_switch(active_symbol)
                         await md.close()
                         active_symbol      = next_sym
@@ -831,6 +849,8 @@ async def main_loop():
                         push_log(f"[MANUAL_SELL] Closed {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
                         log("AGENT", "MANUAL_SELL_EXECUTED", symbol=active_symbol,
                             qty=round(base_bal, 6), price=current_price)
+                        asyncio.create_task(asyncio.to_thread(
+                            _email.notify_fill, _agent_name, active_symbol, "SELL", base_bal, current_price))
                 else:
                     push_log(f"[MANUAL_SELL] No {active_symbol[:-4]} balance to sell")
                     em.positions.clear()
@@ -911,6 +931,8 @@ async def main_loop():
                         import time as _t
                         _last_fill_time[active_symbol] = _t.time()
                         push_log(f"[TRADE] BUY {active_symbol} qty={round(qty,5)} @ ~{current_price:.4f}")
+                        asyncio.create_task(asyncio.to_thread(
+                            _email.notify_fill, _agent_name, active_symbol, "BUY", qty, current_price))
                         pos = em.attach_exits(order, indicators, symbol=active_symbol)
                         if pos:
                             push_transaction({

@@ -14,9 +14,10 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
-MANAGER_PORT = 7430
-STATE_FILE   = Path("/tmp/dipu_manager_state.json")
-AGENT_SCRIPT = Path(__file__).parent / "agent.py"
+MANAGER_PORT      = 7430
+STATE_FILE        = Path("/tmp/dipu_manager_state.json")
+AGENT_SCRIPT      = Path(__file__).parent / "agent.py"
+EMAIL_CONFIG_FILE = Path("/tmp/dipu_email_config.json")
 
 # mode → (default port, API label, badge colour)
 MODE_META = {
@@ -266,6 +267,47 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
   <div class="no-agents">Loading…</div>
 </div>
 
+<h2>&#9993; Email Notifications</h2>
+<div class="email-panel" id="email-panel">
+  <div class="email-row">
+    <div class="field">
+      <label>Recipient email</label>
+      <input id="em-recipient" type="email" placeholder="you@gmail.com" style="min-width:220px">
+    </div>
+    <div class="field">
+      <label>Sender (Gmail)</label>
+      <input id="em-user" type="email" placeholder="sender@gmail.com" style="min-width:220px">
+    </div>
+    <div class="field">
+      <label>App password</label>
+      <input id="em-pass" type="password" placeholder="xxxx xxxx xxxx xxxx" style="min-width:180px">
+    </div>
+  </div>
+  <div class="email-row" style="margin-top:12px">
+    <span style="color:#888;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;margin-right:16px">Notify on:</span>
+    <label class="chk-label"><input type="checkbox" id="chk-rotation"  checked> Coin rotation</label>
+    <label class="chk-label"><input type="checkbox" id="chk-fills"     checked> Order fills</label>
+    <label class="chk-label"><input type="checkbox" id="chk-coin"      checked> Coin traded (on change)</label>
+    <label class="chk-label"><input type="checkbox" id="chk-pnl"       checked> 4h P&amp;L report</label>
+  </div>
+  <div class="email-row" style="margin-top:14px;gap:10px">
+    <label class="chk-label" style="margin-right:16px">
+      <input type="checkbox" id="em-enabled"> <span style="color:#00e676">Enable email notifications</span>
+    </label>
+    <button class="btn btn-spawn" onclick="saveEmailConfig()" style="padding:7px 16px">&#128190; Save</button>
+    <button class="btn btn-open"  onclick="testEmail()"       style="padding:7px 16px">&#9993; Test email</button>
+    <button class="btn btn-spawn" onclick="sendPnlNow()"      style="padding:7px 16px;background:#1a1a1a;color:#00e5ff;border:1px solid #00e5ff">&#128202; Send P&amp;L now</button>
+    <span id="email-msg" style="font-size:.72rem;color:#00e676;align-self:center;margin-left:8px"></span>
+  </div>
+</div>
+
+<style>
+.email-panel{background:#0e0e0e;border:1px solid #1e1e1e;border-radius:8px;padding:20px;margin-bottom:28px}
+.email-row{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
+.chk-label{display:flex;align-items:center;gap:6px;font-size:.72rem;color:#aaa;cursor:pointer;user-select:none}
+.chk-label input{accent-color:#00e676;width:14px;height:14px;cursor:pointer}
+</style>
+
 <script>
 const MODE_COLOR = {testnet:'#ffd600', demo:'#00bcd4', live:'#ff1744'};
 const MODE_TEXT  = {testnet:'TESTNET', demo:'DEMO', live:'⚠ LIVE'};
@@ -501,6 +543,72 @@ setInterval(loadPool, 5000);
 loadCoins();
 loadAgents();
 setInterval(loadAgents, 5000);
+
+async function loadEmailConfig() {
+  try {
+    const r = await fetch('/api/email-config');
+    const d = await r.json();
+    document.getElementById('em-recipient').value = d.recipient || '';
+    document.getElementById('em-user').value      = d.smtp_user || '';
+    document.getElementById('em-pass').value      = d.smtp_password ? '••••••••' : '';
+    document.getElementById('em-enabled').checked = !!d.enabled;
+    const n = d.notifications || {};
+    document.getElementById('chk-rotation').checked = n.coin_rotation !== false;
+    document.getElementById('chk-fills').checked    = n.order_fills   !== false;
+    document.getElementById('chk-coin').checked     = n.coin_traded   !== false;
+    document.getElementById('chk-pnl').checked      = n.pnl_report    !== false;
+  } catch(e) {}
+}
+
+async function saveEmailConfig() {
+  const msg = document.getElementById('email-msg');
+  const passVal = document.getElementById('em-pass').value;
+  const body = {
+    recipient:     document.getElementById('em-recipient').value.trim(),
+    smtp_user:     document.getElementById('em-user').value.trim(),
+    smtp_password: passVal === '••••••••' ? null : passVal,
+    enabled:       document.getElementById('em-enabled').checked,
+    notifications: {
+      coin_rotation: document.getElementById('chk-rotation').checked,
+      order_fills:   document.getElementById('chk-fills').checked,
+      coin_traded:   document.getElementById('chk-coin').checked,
+      pnl_report:    document.getElementById('chk-pnl').checked,
+    },
+  };
+  msg.textContent = 'Saving…';
+  const r = await fetch('/api/email-config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  msg.textContent = d.ok ? '✓ Saved' : '✗ ' + (d.error || 'error');
+  setTimeout(() => msg.textContent = '', 4000);
+}
+
+async function testEmail() {
+  const msg = document.getElementById('email-msg');
+  const recipient = document.getElementById('em-recipient').value.trim();
+  if (!recipient) { msg.textContent = '✗ Enter recipient email first'; setTimeout(()=>msg.textContent='',3000); return; }
+  msg.textContent = 'Sending test…';
+  const r = await fetch('/api/email-test', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({recipient}),
+  });
+  const d = await r.json();
+  msg.textContent = d.ok ? '✓ Test email sent' : '✗ ' + (d.error || 'failed — check SMTP credentials');
+  setTimeout(() => msg.textContent = '', 6000);
+}
+
+async function sendPnlNow() {
+  const msg = document.getElementById('email-msg');
+  msg.textContent = 'Sending P&L report…';
+  const r = await fetch('/api/email-pnl', {method:'POST'});
+  const d = await r.json();
+  msg.textContent = d.ok ? '✓ P&L report sent' : '✗ ' + (d.error || 'failed');
+  setTimeout(() => msg.textContent = '', 5000);
+}
+
+loadEmailConfig();
 </script>
 </body>
 </html>
@@ -511,13 +619,17 @@ class AgentManager:
     def __init__(self):
         self._session: aiohttp.ClientSession | None = None
         self._app = web.Application()
-        self._app.router.add_get("/",                    self._dashboard)
-        self._app.router.add_get("/api/agents",          self._list)
-        self._app.router.add_get("/api/coins",           self._coins)
-        self._app.router.add_post("/api/spawn",          self._spawn)
-        self._app.router.add_post("/api/stop",           self._stop)
-        self._app.router.add_get("/api/pool",          self._pool)
-        self._app.router.add_post("/api/spawn-fleet",  self._spawn_fleet)
+        self._app.router.add_get("/",                      self._dashboard)
+        self._app.router.add_get("/api/agents",            self._list)
+        self._app.router.add_get("/api/coins",             self._coins)
+        self._app.router.add_post("/api/spawn",            self._spawn)
+        self._app.router.add_post("/api/stop",             self._stop)
+        self._app.router.add_get("/api/pool",              self._pool)
+        self._app.router.add_post("/api/spawn-fleet",      self._spawn_fleet)
+        self._app.router.add_get("/api/email-config",      self._email_config_get)
+        self._app.router.add_post("/api/email-config",     self._email_config_post)
+        self._app.router.add_post("/api/email-test",       self._email_test)
+        self._app.router.add_post("/api/email-pnl",        self._email_pnl_now)
         self._app.router.add_route("*", "/agent/{name}/{path:.*}", self._proxy)
 
     async def _dashboard(self, _):
@@ -715,11 +827,98 @@ class AgentManager:
 
         return web.json_response({"ok": True, "agents": spawned, "top4": top4})
 
+    def _load_email_cfg(self) -> dict:
+        try:
+            if EMAIL_CONFIG_FILE.exists():
+                return json.loads(EMAIL_CONFIG_FILE.read_text())
+        except Exception:
+            pass
+        return {"enabled": False, "recipient": "", "smtp_host": "smtp.gmail.com",
+                "smtp_port": 587, "smtp_user": "", "smtp_password": "",
+                "notifications": {"coin_rotation": True, "order_fills": True,
+                                   "coin_traded": True, "pnl_report": True}}
+
+    def _save_email_cfg(self, cfg: dict) -> None:
+        EMAIL_CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+
+    async def _email_config_get(self, _) -> web.Response:
+        cfg = self._load_email_cfg()
+        # Never expose password in full — just signal presence
+        safe = {**cfg, "smtp_password": "set" if cfg.get("smtp_password") else ""}
+        return web.json_response(safe)
+
+    async def _email_config_post(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            cfg  = self._load_email_cfg()
+            if body.get("recipient") is not None:
+                cfg["recipient"] = body["recipient"]
+            if body.get("smtp_user") is not None:
+                cfg["smtp_user"] = body["smtp_user"]
+            if body.get("smtp_password"):  # null means "keep existing"
+                cfg["smtp_password"] = body["smtp_password"]
+            if body.get("enabled") is not None:
+                cfg["enabled"] = bool(body["enabled"])
+            if body.get("notifications"):
+                cfg["notifications"] = {**cfg.get("notifications", {}), **body["notifications"]}
+            self._save_email_cfg(cfg)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def _email_test(self, request: web.Request) -> web.Response:
+        import concurrent.futures
+        try:
+            body      = await request.json()
+            recipient = body.get("recipient", "")
+            if not recipient:
+                return web.json_response({"error": "recipient required"}, status=400)
+            import email_notifier as _em
+            loop   = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, _em.send_test_email, recipient)
+            return web.json_response({"ok": result, "error": None if result else "send failed — check SMTP credentials"})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _email_pnl_now(self, _) -> web.Response:
+        try:
+            pool_data = await self._get_pool_data()
+            import email_notifier as _em
+            loop   = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, _em.send_pnl_report, pool_data)
+            return web.json_response({"ok": result})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _get_pool_data(self) -> dict:
+        try:
+            with open(POOL_FILE) as f:
+                data = json.load(f)
+            return data.get("slots", {})
+        except Exception:
+            return {}
+
+    async def _pnl_report_scheduler(self):
+        """Send a P&L report email every 4 hours."""
+        INTERVAL = 4 * 3600
+        await asyncio.sleep(INTERVAL)  # first report after 4h, not on startup
+        while True:
+            try:
+                pool_data = await self._get_pool_data()
+                import email_notifier as _em
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, _em.send_pnl_report, pool_data)
+                print("[manager] 4h P&L report sent")
+            except Exception as e:
+                print(f"[manager] P&L report error: {e}")
+            await asyncio.sleep(INTERVAL)
+
     async def start(self):
         runner = web.AppRunner(self._app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", MANAGER_PORT)
         await site.start()
+        asyncio.create_task(self._pnl_report_scheduler())
         print(f"[manager] running on :{MANAGER_PORT}")
 
 
