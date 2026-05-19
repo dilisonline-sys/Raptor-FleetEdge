@@ -580,20 +580,26 @@ async def main_loop():
                 _ranked_idx        = 0
             else:
                 none_signal_streak += 1
-                # Rotate to the next best ranked coin when no setup found repeatedly (auto mode only)
-                coin_mode = _state.get("coin_mode", "auto")
-                if coin_mode == "auto" and none_signal_streak >= NONE_SIGNAL_ROTATE and not em.positions and scanner.ranked:
+                # Rotate to the next best ranked coin when no setup found repeatedly.
+                # A named coin_mode (e.g. "BTCUSDT") is a startup preference, not a forever lock.
+                # After NONE_SIGNAL_ROTATE cycles with no setup on the locked coin, escape to auto.
+                coin_mode  = _state.get("coin_mode", "auto")
+                _can_rotate = coin_mode == "auto" or (
+                    coin_mode not in ("auto", None) and scanner.ranked and
+                    scanner.ranked[0]["symbol"] != active_symbol
+                )
+                if _can_rotate and none_signal_streak >= NONE_SIGNAL_ROTATE and not em.positions and scanner.ranked:
                     _ranked_idx = (_ranked_idx + 1) % len(scanner.ranked)
                     next_sym    = scanner.ranked[_ranked_idx]["symbol"]
                     if next_sym != active_symbol:
-                        push_log(f"[ROTATE] No setup on {active_symbol} for {none_signal_streak} cycles — trying {next_sym}")
+                        push_log(f"[ROTATE] No setup on {active_symbol} for {none_signal_streak} cycles — switching to {next_sym}")
                         log("AGENT", "SIGNAL_ROTATE", from_=active_symbol, to=next_sym,
                             streak=none_signal_streak, idx=_ranked_idx)
                         await md.close()
                         active_symbol      = next_sym
                         md                 = MarketData(active_symbol, cfg.INTERVAL)
                         await md.connect()
-                        update_state(symbol=active_symbol)
+                        update_state(symbol=active_symbol, coin_mode="auto")
                         none_signal_streak = 0
                     await _cycle_sleep()
                     continue
