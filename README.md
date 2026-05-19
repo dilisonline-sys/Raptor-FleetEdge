@@ -14,6 +14,8 @@ dipu is a multi-agent cryptocurrency trading system built for Binance Spot. A **
 - Sizes positions dynamically based on ATR and account equity
 - Manages exits with a 3-tier TP ladder aligned to the past 1-hour price range
 - Agent 1 (slot 0) is permanently locked to BTCUSDT; the other three rotate to the best-ranked coins
+- Liquidates base asset back to USDT automatically before every coin rotation (slots 1–3)
+- Persists open positions across restarts — exact entry, stop, and TP values are restored
 - Each agent exposes a live dashboard with 1-second candle charts, AI analyst panel, and order log
 
 ---
@@ -255,6 +257,27 @@ curl -X POST http://localhost:7430/agent/dipu-live/instruction \
   -H "X-Agent-Token: internal" \
   -d '{"action":"SWITCH_MODE","mode":"live","source":"manual"}'
 ```
+
+---
+
+## Coin Rotation & Liquidation
+
+Agents in slots 1–3 automatically rotate to the best-ranked coin when:
+
+| Trigger | Description |
+|---|---|
+| Scanner pick | Background scanner finds a higher-ranked coin with no open position |
+| Quality gate escape | 2 consecutive data quality fails on the current coin |
+| Ranging escape | Current coin classified RANGING — immediately rotates to next ranked coin |
+| Volatile escape | Current coin VOLATILE for 10+ minutes — forces rotation |
+| Signal rotate | No tradeable setup for 5 consecutive cycles |
+| SELL with no position | Bear signal on a coin we don't hold — rotates immediately |
+| Manual `SWITCH_COIN` | Operator-requested switch via instruction endpoint |
+| Manual `FORCE_BTC` | Forces switch to BTCUSDT |
+
+**Before every rotation** (slots 1–3 only), the agent automatically sells any remaining base asset back to USDT so the equity pool always has liquid capital for the next entry.
+
+**Slot 0 (BTC agent) never rotates and never sells** — it stays in BTCUSDT permanently.
 
 ---
 
