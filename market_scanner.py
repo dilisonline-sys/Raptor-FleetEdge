@@ -16,7 +16,8 @@ from logger import log
 import config as cfg
 
 SCAN_INTERVAL   = 300        # re-rank every 5 minutes (matches cycle)
-MIN_VOLUME_USDT = 3_000_000  # lowered to catch high-momentum small caps (e.g. RAD +9% 1h)
+MIN_VOLUME_USDT = 15_000_000 # $15M 24h volume — filters out micro-caps that spike and reverse
+MIN_PRICE       = 0.05       # reject sub-$0.05 coins — poor spread behaviour under $0.05
 MIN_PRICE_CHG   = 1.0        # need at least 1% move — momentum only
 MAX_SPREAD_PCT  = 0.30       # raised — low-price coins (e.g. $0.30) hit 0.29% spread on 1 tick
 TOP_N           = 12         # score top 12 candidates with indicators
@@ -66,7 +67,7 @@ class MarketScanner:
                 price     = float(t["lastPrice"])
                 bid_price = float(t.get("bidPrice") or price)
                 ask_price = float(t.get("askPrice") or price)
-                if vol < MIN_VOLUME_USDT or price <= 0:
+                if vol < MIN_VOLUME_USDT or price < MIN_PRICE:
                     continue
                 mid_p      = (bid_price + ask_price) / 2
                 spread_pct = (ask_price - bid_price) / mid_p * 100 if mid_p else 99
