@@ -349,12 +349,21 @@ async def main_loop():
 
     async def _liquidate_before_switch(symbol: str) -> None:
         """Sell any remaining base asset back to USDT before rotating to a new coin.
-        Never called for slot 0 (BTC-locked). Silently skips if balance is below min notional."""
+        Never called for slot 0 (BTC-locked). Silently skips if:
+          - balance is below min notional ($11)
+          - coin price is below MIN_PRICE (micro-cap — don't dump into a thin market)
+        """
         try:
-            _tick = await md.get_ticker()
+            _tick  = await md.get_ticker()
             _price = _tick.get("price", 0)
+            # Skip micro-caps: selling an underwater sub-penny coin just crystallises
+            # the loss into a thin book. Leave the orphan balance — it's too small to matter.
+            if _price < cfg.MIN_PRICE:
+                push_log(f"[PRE_SWITCH] Skipping {symbol[:-4]} liquidation — price ${_price:.5f} below MIN_PRICE ${cfg.MIN_PRICE}")
+                log("AGENT", "PRE_SWITCH_SKIP", symbol=symbol, price=_price, reason="below_min_price")
+                return
             base_bal = await om.get_base_balance(symbol)
-            min_qty = 11.0 / _price if _price > 0 else 0
+            min_qty  = 11.0 / _price if _price > 0 else 0
             if base_bal > min_qty:
                 push_log(f"[PRE_SWITCH] Liquidating {base_bal:.6f} {symbol[:-4]} → USDT before rotation")
                 log("AGENT", "PRE_SWITCH_SELL", symbol=symbol, qty=round(base_bal, 6))
