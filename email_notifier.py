@@ -2,6 +2,7 @@
 import json
 import os
 import smtplib
+import ssl
 import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -12,7 +13,7 @@ _DEFAULT_CONFIG: dict = {
     "enabled": False,
     "recipient": "",
     "smtp_host": "smtp.gmail.com",
-    "smtp_port": 587,
+    "smtp_port": 465,
     "smtp_user": "",
     "smtp_password": "",
     "notifications": {
@@ -61,11 +62,20 @@ def _send(subject: str, body_html: str) -> bool:
         msg["From"]    = cfg["smtp_user"]
         msg["To"]      = cfg["recipient"]
         msg.attach(MIMEText(body_html, "html"))
-        with smtplib.SMTP(cfg["smtp_host"], int(cfg["smtp_port"]), timeout=20) as s:
-            s.ehlo()
-            s.starttls()
-            s.login(cfg["smtp_user"], cfg["smtp_password"])
-            s.sendmail(cfg["smtp_user"], cfg["recipient"], msg.as_string())
+        port = int(cfg["smtp_port"])
+        ctx  = ssl.create_default_context()
+        if port == 465:
+            # Direct SSL (SMTP_SSL) — works where STARTTLS on 587 is blocked
+            with smtplib.SMTP_SSL(cfg["smtp_host"], port, context=ctx, timeout=20) as s:
+                s.login(cfg["smtp_user"], cfg["smtp_password"])
+                s.sendmail(cfg["smtp_user"], cfg["recipient"], msg.as_string())
+        else:
+            # STARTTLS on port 587 (or custom port)
+            with smtplib.SMTP(cfg["smtp_host"], port, timeout=20) as s:
+                s.ehlo()
+                s.starttls(context=ctx)
+                s.login(cfg["smtp_user"], cfg["smtp_password"])
+                s.sendmail(cfg["smtp_user"], cfg["recipient"], msg.as_string())
         return True
     except Exception as e:
         print(f"[email] send failed: {e}")

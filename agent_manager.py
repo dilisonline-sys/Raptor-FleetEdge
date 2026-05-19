@@ -834,7 +834,7 @@ class AgentManager:
         except Exception:
             pass
         return {"enabled": False, "recipient": "", "smtp_host": "smtp.gmail.com",
-                "smtp_port": 587, "smtp_user": "", "smtp_password": "",
+                "smtp_port": 465, "smtp_user": "", "smtp_password": "",
                 "notifications": {"coin_rotation": True, "order_fills": True,
                                    "coin_traded": True, "pnl_report": True}}
 
