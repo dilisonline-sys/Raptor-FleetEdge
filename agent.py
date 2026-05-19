@@ -10,6 +10,8 @@ Dynamic symbol selection: dipu scans all USDT pairs every 15 minutes and
 switches to whichever coin offers the best profit potential per minute.
 """
 import asyncio
+import dataclasses
+import json
 import os
 import sys
 import time as _time
@@ -28,6 +30,58 @@ from logger import log
 import config as cfg
 import equity_pool as _ep
 from ai_analyst import AIAnalyst
+
+
+# ── Position persistence ──────────────────────────────────────────────────
+def _pos_file(slot: int) -> str:
+    return f"/tmp/dipu_positions_{slot}.json"
+
+
+def _save_positions(slot: int, symbol: str, positions: list) -> None:
+    """Write open positions to disk so they survive a restart."""
+    try:
+        data = {
+            "symbol":    symbol,
+            "slot":      slot,
+            "ts":        _time.time(),
+            "positions": [dataclasses.asdict(p) for p in positions],
+        }
+        with open(_pos_file(slot), "w") as _f:
+            json.dump(data, _f)
+        log("AGENT", "POS_SAVED", slot=slot, symbol=symbol, count=len(positions))
+    except Exception as _e:
+        log("AGENT", "POS_SAVE_ERROR", error=str(_e))
+
+
+def _load_positions(slot: int, symbol: str) -> list | None:
+    """Restore positions from the previous run if they match the current symbol."""
+    path = _pos_file(slot)
+    try:
+        if not os.path.exists(path):
+            return None
+        with open(path) as _f:
+            data = json.load(_f)
+        if data.get("symbol") != symbol:
+            log("AGENT", "POS_RESTORE_SKIP", reason="symbol_mismatch",
+                saved=data.get("symbol"), current=symbol)
+            return None
+        positions = [Position(**p) for p in data.get("positions", [])]
+        os.unlink(path)  # consume — prevents re-loading stale state on second restart
+        log("AGENT", "POS_RESTORED", slot=slot, symbol=symbol, count=len(positions))
+        return positions if positions else None
+    except Exception as _e:
+        log("AGENT", "POS_LOAD_ERROR", error=str(_e))
+        return None
+
+
+def _clear_positions_file(slot: int) -> None:
+    """Remove position file once all positions are closed."""
+    try:
+        path = _pos_file(slot)
+        if os.path.exists(path):
+            os.unlink(path)
+    except Exception:
+        pass
 
 
 DIPU_PERSONA = """
@@ -135,6 +189,19 @@ async def main_loop():
     _wake      = asyncio.Event()
     server     = InstructionServer(queue)
     set_wake_event(_wake)
+
+    # ── SIGTERM handler: save positions before the process dies ───────────────
+    import signal as _sig
+    def _on_sigterm(*_):
+        try:
+            _sym = active_symbol  # may not be set yet if SIGTERM arrives very early
+        except NameError:
+            _sym = os.environ.get("AGENT_SYMBOL", "BTCUSDT")
+        if em.positions:
+            _save_positions(_agent_slot, _sym, em.positions)
+            log("AGENT", "SIGTERM_SAVE", slot=_agent_slot, symbol=_sym, count=len(em.positions))
+        sys.exit(0)
+    _sig.signal(_sig.SIGTERM, _on_sigterm)
 
     await server.start()
     update_state(pool_slot=_agent_slot)
@@ -288,9 +355,19 @@ async def main_loop():
         push_log(f"[STARTUP] Slot {_agent_slot} — waiting {_stagger_secs}s for pool to populate")
         await asyncio.sleep(_stagger_secs)
 
-    # ── Pre-loop orphan sweep: find any unmanaged coin holdings ──────────────
+    # ── Restore positions from previous run (exact entry/stop/TP preserved) ──
+    _restored = _load_positions(_agent_slot, active_symbol)
+    if _restored:
+        em.positions = _restored
+        _p0 = _restored[0]
+        push_log(f"[POS_RESTORE] Restored {len(_restored)} position(s) for {active_symbol} "
+                 f"| entry={_p0.avg_entry:.5f} stop={_p0.stop:.5f} tp1={_p0.tp1:.5f} qty={_p0.qty:.6f}")
+
+    # ── Pre-loop orphan sweep (skipped if positions were just restored) ───────
     try:
         _all_held = await om.get_all_significant_balances(min_usdt_value=5.0)
+        if em.positions:
+            _all_held = []  # positions already restored — skip synthetic recreation
         if _all_held:
             log("AGENT", "ORPHAN_SWEEP", coins=[c["asset"] for c in _all_held])
             for _held in _all_held:
@@ -864,9 +941,17 @@ async def main_loop():
             _pool_open_usdt = sum(p.qty * current_price for p in em.positions)
             _pool_pnl       = equity - (risk.day_start_equity or equity)
 
+            # ── Persist positions after every cycle ───────────────────────────
+            if em.positions:
+                _save_positions(_agent_slot, active_symbol, em.positions)
+            else:
+                _clear_positions_file(_agent_slot)
+
             await _cycle_sleep()
 
         except KeyboardInterrupt:
+            if em.positions:
+                _save_positions(_agent_slot, active_symbol, em.positions)
             log("AGENT", "SHUTDOWN", reason="KeyboardInterrupt")
             await om.cancel_all()
             await md.close()
