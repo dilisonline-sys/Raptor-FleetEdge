@@ -58,9 +58,16 @@ class ExitManager:
         stop       = (entry - atr * cfg.ATR_STOP_MULT) if side == "BUY" else (entry + atr * cfg.ATR_STOP_MULT)
         risk       = abs(entry - stop) * qty
         direction  = 1 if side == "BUY" else -1
-        tp1 = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP1_R
-        tp2 = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP2_R
-        tp3 = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP3_R
+        h1_range   = ind.get("h1_range", 0)
+        if h1_range > 0:
+            # Anchor TPs to the actual 1h price range so they land within observed volatility
+            tp1 = entry + direction * h1_range * 0.40
+            tp2 = entry + direction * h1_range * 0.80
+            tp3 = entry + direction * h1_range * 1.25
+        else:
+            tp1 = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP1_R
+            tp2 = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP2_R
+            tp3 = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP3_R
 
         pos = Position(side=side, avg_entry=entry, qty=qty, stop=stop,
                        tp1=tp1, tp2=tp2, tp3=tp3, initial_risk=risk,

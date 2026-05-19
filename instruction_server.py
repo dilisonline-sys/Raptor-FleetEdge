@@ -3,12 +3,13 @@ Multi-agent instruction interface for dipu.
 """
 import asyncio
 import json
+import os
 import time
 from aiohttp import web
 from logger import log
 import config as cfg
 
-VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO"}
+VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO", "AI_ANALYST_ON", "AI_ANALYST_OFF"}
 
 _state = {
     "started_at":    time.time(),
@@ -37,6 +38,14 @@ _state = {
     "scanner_ranked": [],
     "scanner_best":   "—",
     "scanner_ts":     0,
+    "pool_slot":  int(os.environ.get("AGENT_SLOT", "0")),
+    "pool_state": {},
+    "usdt_balance":     0.0,
+    "coin_qty":         0.0,
+    "coin_value_usdt":  0.0,
+    "coin_asset":       "—",
+    "ai_analyst_enabled": False,
+    "ai_analysis":      {},
 }
 
 # ── HTML template ──────────────────────────────────────────────────────────────
@@ -108,6 +117,13 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 </head>
 <body>
 <h1>&#9654; __AGENT_NAME__ <span class="badge __MODE_CLASS__">__MODE__</span><span id="sse-status" style="color:#fff">○ connecting…</span></h1>
+<div id="pool-bar" style="display:flex;align-items:center;gap:16px;padding:6px 12px;background:#0e0e0e;border:1px solid #1a1a1a;border-radius:6px;margin-bottom:12px;font-size:.7rem;flex-wrap:wrap">
+  <span style="color:#555;text-transform:uppercase;letter-spacing:.08em">Pool</span>
+  <span>Slot <span id="pb-slot" style="color:#00e5ff;font-weight:bold">—</span></span>
+  <span>Budget <span id="pb-budget" style="color:#ffd600;font-weight:bold">—</span></span>
+  <span>Other agents: <span id="pb-others" style="color:#aaa">—</span></span>
+  <span style="margin-left:auto;color:#555;font-size:.65rem" id="pb-ts">—</span>
+</div>
 <div class="sub">
   <span style="color:#00e5ff;font-family:monospace">&#128279; __API_URL__</span>
   &nbsp;·&nbsp; autonomous crypto trading agent
@@ -123,8 +139,9 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 </div>
 
 <div class="grid" id="cards">
-  <div class="card"><div class="lbl">Equity (USDT)</div><div class="val" id="c-eq">—</div></div>
+  <div class="card"><div class="lbl">USDT Balance</div><div class="val" id="c-usdt-bal">—</div><div style="font-size:.7rem;color:#aaa;margin-top:3px">Total: <span id="c-eq">—</span></div></div>
   <div class="card"><div class="lbl">Active Coin</div><div class="val g" id="c-sym">—</div></div>
+  <div class="card"><div class="lbl">Asset Balance</div><div class="val y" id="c-coin-qty">—</div><div style="font-size:.7rem;color:#aaa;margin-top:3px" id="c-coin-val">—</div></div>
   <div class="card"><div class="lbl">Mode</div><div class="val" id="c-mode">—</div></div>
   <div class="card"><div class="lbl">Regime</div><div class="val y" id="c-reg">—</div></div>
   <div class="card"><div class="lbl">Open Positions</div><div class="val" id="c-pos">—</div></div>
@@ -148,7 +165,7 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 <div class="chart-wrap">
   <div class="chart-header">
     <span class="chart-sym" id="chart-sym-label">—</span>
-    <span class="chart-meta" id="chart-meta">1H candles · EMA 9/21 · entry / stop / TP levels</span>
+    <span class="chart-meta" id="chart-meta">1s live candles · EMA 9/21 overlay · entry / stop / TP levels</span>
   </div>
   <div id="chart"></div>
   <div class="legend">
@@ -158,6 +175,56 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
     <span><div class="dot" style="background:#ff1744;width:2px;height:12px;border-radius:0"></div>Stop</span>
     <span><div class="dot" style="background:#00bcd4;width:2px;height:12px;border-radius:0"></div>TP1/TP2</span>
   </div>
+</div>
+
+<h2 style="display:flex;align-items:center;justify-content:space-between">
+  <span>&#9632; AI Analyst <span style="font-size:.6rem;color:#555;font-weight:normal;margin-left:6px">advisory only · does not affect trades</span></span>
+  <button id="ai-toggle-btn" onclick="toggleAnalyst()" style="font-size:.68rem;padding:4px 12px;border-radius:4px;border:1px solid #333;background:#111;color:#aaa;cursor:pointer">Enable</button>
+</h2>
+<div id="ai-panel" style="display:none;background:#0a0d0a;border:1px solid #1a2e1a;border-radius:8px;padding:14px;margin-bottom:20px;font-size:.73rem">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:10px">
+    <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
+      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Sentiment</div>
+      <div id="ai-sentiment" style="font-size:1.1rem;font-weight:bold;color:#00e676">—</div>
+    </div>
+    <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
+      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Confidence</div>
+      <div id="ai-confidence" style="font-size:1.1rem;font-weight:bold;color:#00e5ff">—</div>
+    </div>
+    <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
+      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Trend</div>
+      <div id="ai-trend" style="font-size:1.1rem;font-weight:bold;color:#ffd600">—</div>
+    </div>
+    <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
+      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Momentum</div>
+      <div id="ai-momentum" style="font-size:1.1rem;font-weight:bold;color:#fff">—</div>
+    </div>
+    <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
+      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Entry Quality</div>
+      <div id="ai-entry" style="font-size:1.1rem;font-weight:bold;color:#fff">—</div>
+    </div>
+    <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
+      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Risk Level</div>
+      <div id="ai-risk" style="font-size:1.1rem;font-weight:bold;color:#fff">—</div>
+    </div>
+    <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
+      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Support</div>
+      <div id="ai-support" style="font-size:.95rem;font-weight:bold;color:#00e676">—</div>
+    </div>
+    <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
+      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Resistance</div>
+      <div id="ai-resistance" style="font-size:.95rem;font-weight:bold;color:#ff1744">—</div>
+    </div>
+  </div>
+  <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px;margin-bottom:6px">
+    <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px">Market Insight</div>
+    <div id="ai-insight" style="color:#ddd;line-height:1.5">—</div>
+  </div>
+  <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
+    <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px">Watch Next Candle</div>
+    <div id="ai-watch" style="color:#ffd600;line-height:1.5">—</div>
+  </div>
+  <div style="margin-top:6px;color:#555;font-size:.62rem;text-align:right" id="ai-ts">—</div>
 </div>
 
 <h2>&#9646; Market Scanner <span id="scanner-ts" style="font-size:.6rem;color:#555;margin-left:8px">scanning…</span></h2>
@@ -227,7 +294,12 @@ let _currentSym  = '';
 let _lastOpenPos = null;
 let _coinMode    = 'auto';   // 'auto' | 'BTCUSDT' etc.
 let _topCoins    = [];       // last known top coins list
-let _lastCandle  = null;     // last candle OHLC — updated live from SSE price ticks
+// ── 1-second live candle state ────────────────────────────
+const MAX_1S_BARS   = 500;   // ~8 min of 1s bars visible
+let _live1sBars    = [];     // circular history of closed 1s candles
+let _cur1sBar      = null;   // currently building 1s candle
+let _cur1sTime     = 0;      // epoch-second of current bar
+let _lastChartTs   = 0;      // tracks chart_ts from SSE (triggers EMA overlay refresh)
 
 // ── Chart init ────────────────────────────────────────────
 function initChart() {
@@ -278,32 +350,49 @@ function updatePosLines(pos) {
 // Browser local timezone offset in seconds (e.g. GMT+4 → +14400)
 const TZ_OFFSET = -new Date().getTimezoneOffset() * 60;
 
-// ── Chart data — polled separately (heavy payload) ────────
-async function refreshChart(sym) {
+// ── 1-second live candle engine ───────────────────────────
+function tick1s(price) {
+  if (!candleSeries) return;
+  const nowSec = Math.floor(Date.now() / 1000) + TZ_OFFSET;  // local epoch-second
+  if (!_cur1sBar || nowSec > _cur1sTime) {
+    // Close current bar into history
+    if (_cur1sBar) {
+      _live1sBars.push({..._cur1sBar});
+      if (_live1sBars.length > MAX_1S_BARS) {
+        _live1sBars.shift();
+        candleSeries.setData([..._live1sBars, _cur1sBar]);
+      } else {
+        try { candleSeries.update(_cur1sBar); } catch(e) {}
+      }
+    }
+    // Open new 1s bar
+    _cur1sTime = nowSec;
+    _cur1sBar  = { time: nowSec, open: price, high: price, low: price, close: price };
+    // If chart is empty, seed with history so it doesn't start blank
+    if (_live1sBars.length === 0) {
+      try { candleSeries.setData([_cur1sBar]); } catch(e) {}
+    }
+  } else {
+    _cur1sBar.high  = Math.max(_cur1sBar.high, price);
+    _cur1sBar.low   = Math.min(_cur1sBar.low,  price);
+    _cur1sBar.close = price;
+  }
+  try { candleSeries.update(_cur1sBar); } catch(e) {}
+  updatePosLines(_lastOpenPos);
+}
+
+// ── EMA overlay — loaded from agent's 15m data, shifted to local time ────
+async function refreshEMAOverlay(sym) {
   if (!sym || sym === '—') return;
   try {
     const r  = await fetch('/api/chart?symbol=' + encodeURIComponent(sym));
     if (!r.ok) return;
     const cd = await r.json();
-    if (!cd || !cd.candles || !cd.candles.length) return;
-    // Shift all timestamps to local time so the axis shows local hours
-    const shiftC = c => ({...c, time: c.time + TZ_OFFSET});
+    if (!cd) return;
     const shiftV = v => ({...v, time: v.time + TZ_OFFSET});
-    candleSeries.setData(cd.candles.map(shiftC));
-    // Anchor _lastCandle using local bar boundary
-    const last    = cd.candles[cd.candles.length - 1];
-    const barTime = Math.floor((Date.now() / 1000 + TZ_OFFSET) / 3600) * 3600;
-    _lastCandle = {
-      time:  Math.max(last.time + TZ_OFFSET, barTime),
-      open:  barTime > last.time + TZ_OFFSET ? last.close : last.open,
-      high:  barTime > last.time + TZ_OFFSET ? last.close : last.high,
-      low:   barTime > last.time + TZ_OFFSET ? last.close : last.low,
-      close: last.close,
-    };
     if (cd.ema9  && cd.ema9.length)  ema9Series.setData(cd.ema9.map(shiftV));
     if (cd.ema21 && cd.ema21.length) ema21Series.setData(cd.ema21.map(shiftV));
-    updatePosLines(_lastOpenPos);
-  } catch(e) { console.error('chart fetch:', e); }
+  } catch(e) { console.error('ema fetch:', e); }
 }
 
 // ── Real-time SSE stream ──────────────────────────────────
@@ -315,42 +404,28 @@ function connectSSE() {
       const s = JSON.parse(e.data);
       renderCards(s);
       _lastOpenPos = s.open_pos || null;
-      updatePosLines(_lastOpenPos);
       renderTx(s.transactions || []);
       renderLog(s.last_log || []);
       renderScanner(s);
       syncHaltButtons(s.halt || false);
-      // Refresh chart immediately on symbol switch
+      renderAnalyst(s);
+      // On symbol switch: clear 1s candle state and reload EMA overlay
       const sym = s.symbol || '';
       if (sym && sym !== _currentSym) {
         _currentSym = sym;
-        _lastCandle = null;
-        refreshChart(sym);
+        _live1sBars = []; _cur1sBar = null; _cur1sTime = 0;
+        if (candleSeries) candleSeries.setData([]);
+        if (ema9Series)   ema9Series.setData([]);
+        if (ema21Series)  ema21Series.setData([]);
+        _lastChartTs = s.chart_ts || 0;
+        refreshEMAOverlay(sym);
+      } else if (s.chart_ts && s.chart_ts !== _lastChartTs) {
+        // Agent cycle completed — refresh EMA lines with fresh 15m data
+        _lastChartTs = s.chart_ts;
+        refreshEMAOverlay(sym);
       }
-      // Live-tick the current candle's close from SSE price — no extra HTTP fetch
-      if (s.price && s.price > 0 && candleSeries) {
-        const p = s.price;
-        // If _lastCandle is missing (chart not loaded yet), trigger a load now
-        if (!_lastCandle) {
-          if (sym) refreshChart(sym);
-        } else {
-          // Always anchor time to current 1H bar boundary (local time) to survive bar rollovers
-          const barTime = Math.floor((Date.now() / 1000 + TZ_OFFSET) / 3600) * 3600;
-          // If bar rolled over, open new bar from last close
-          if (barTime > _lastCandle.time) {
-            _lastCandle = { time: barTime, open: p, high: p, low: p, close: p };
-          } else {
-            _lastCandle = {
-              time:  _lastCandle.time,
-              open:  _lastCandle.open,
-              high:  Math.max(_lastCandle.high, p),
-              low:   Math.min(_lastCandle.low,  p),
-              close: p,
-            };
-          }
-          try { candleSeries.update(_lastCandle); } catch(e) { console.warn('chart update failed:', e); }
-        }
-      }
+      // Build 1-second live candles from every SSE price tick
+      if (s.price && s.price > 0) tick1s(s.price);
       sseRetries = 0;
       document.getElementById('sse-status').textContent = '● live';
       document.getElementById('sse-status').style.color = '#00e676';
@@ -376,7 +451,7 @@ async function refresh() {
     renderTx(s.transactions || []);
     renderLog(s.last_log || []);
     renderScanner(s);
-    if (_currentSym) refreshChart(_currentSym);
+    if (_currentSym) refreshEMAOverlay(_currentSym);
   } catch(e) { console.error(e); }
 }
 
@@ -408,8 +483,15 @@ async function selectCoin(sym) {
 function renderCards(s) {
   const upSec = Math.floor(Date.now()/1000 - startedAt);
   const h = Math.floor(upSec/3600), m = Math.floor((upSec%3600)/60);
-  setEl('c-eq',  s.equity ? s.equity.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—');
+  const fmtUsd = v => v ? v.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
+  setEl('c-usdt-bal', s.usdt_balance != null ? '$' + fmtUsd(s.usdt_balance) : '—');
+  setEl('c-eq',  s.equity ? '$' + fmtUsd(s.equity) : '—');
   setEl('c-sym', s.symbol || '—');
+  const coinQty = s.coin_qty || 0;
+  const coinVal = s.coin_value_usdt || 0;
+  const coinAsset = s.coin_asset || '—';
+  setEl('c-coin-qty', coinQty > 0 ? coinQty.toLocaleString('en',{maximumSignificantDigits:6}) + ' ' + coinAsset : '—');
+  setEl('c-coin-val', coinVal > 0 ? '$' + fmtUsd(coinVal) : '');
   const modeEl = document.getElementById('c-mode');
   const modeMap = {testnet:'TESTNET', demo:'DEMO', live:'⚠ LIVE'};
   const modeClr = {testnet:'#ffd600', demo:'#00bcd4', live:'#00e676'};
@@ -451,6 +533,23 @@ function renderCards(s) {
     fgEl.textContent = fg.value + ' · ' + (fg.label || 'Neutral');
     const v = fg.value;
     fgEl.style.color = v <= 20 ? '#ff1744' : v <= 40 ? '#ff9800' : v <= 60 ? '#ffd600' : v <= 80 ? '#66bb6a' : '#00e676';
+  }
+  // Pool bar update
+  if (s.pool_state && Object.keys(s.pool_state).length) {
+    const ps = s.pool_state;
+    setEl('pb-slot', s.pool_slot !== undefined ? s.pool_slot : '—');
+    const mySlot = s.pool_slot;
+    const slots  = ps.slots || {};
+    const others = Object.entries(slots)
+      .filter(([k,v]) => v && parseInt(k) !== mySlot)
+      .map(([k,v]) => v.symbol.replace('USDT',''));
+    setEl('pb-others', others.length ? others.join(', ') : 'none');
+    // Rough budget display: pool_state doesn't carry budget directly, show other agents' open
+    const othersOpen = Object.entries(slots)
+      .filter(([k,v]) => v && parseInt(k) !== mySlot)
+      .reduce((acc,[,v]) => acc + (v.open_usdt||0), 0);
+    setEl('pb-budget', '$' + ((s.equity || 0) * 0.7 - othersOpen).toFixed(0) + ' avail');
+    setEl('pb-ts', new Date(ps.ts*1000).toISOString().slice(11,19)+' UTC');
   }
 }
 
@@ -714,6 +813,63 @@ async function loadOrders() {
   document.getElementById('orders-refresh').textContent = '⟳ refresh';
 }
 
+// ── AI Analyst ────────────────────────────────────────────
+let _aiEnabled = false;
+
+async function toggleAnalyst() {
+  const newState = !_aiEnabled;
+  _aiEnabled = newState;
+  const btn = document.getElementById('ai-toggle-btn');
+  const panel = document.getElementById('ai-panel');
+  if (btn) {
+    btn.textContent = newState ? 'Disable' : 'Enable';
+    btn.style.background = newState ? '#0a1f0a' : '#111';
+    btn.style.borderColor = newState ? '#00e676' : '#333';
+    btn.style.color = newState ? '#00e676' : '#aaa';
+  }
+  if (panel) panel.style.display = newState ? 'block' : 'none';
+  const action = newState ? 'AI_ANALYST_ON' : 'AI_ANALYST_OFF';
+  await fetch('/instruction', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
+    body: JSON.stringify({action, source:'dashboard'})
+  });
+}
+
+function renderAnalyst(s) {
+  const enabled = s.ai_analyst_enabled || false;
+  const btn = document.getElementById('ai-toggle-btn');
+  const panel = document.getElementById('ai-panel');
+  if (!btn || !panel) return;
+  _aiEnabled = enabled;
+  btn.textContent = enabled ? 'Disable' : 'Enable';
+  btn.style.background = enabled ? '#0a1f0a' : '#111';
+  btn.style.borderColor = enabled ? '#00e676' : '#333';
+  btn.style.color = enabled ? '#00e676' : '#aaa';
+  panel.style.display = enabled ? 'block' : 'none';
+  if (!enabled) return;
+  const a = s.ai_analysis || {};
+  if (!a.sentiment) return;
+  const sentColors = {BULLISH:'#00e676', NEUTRAL:'#ffd600', BEARISH:'#ff1744'};
+  const entryColors = {EXCELLENT:'#00e676', GOOD:'#82ff82', POOR:'#ffd600', AVOID:'#ff1744'};
+  const riskColors  = {LOW:'#00e676', MEDIUM:'#ffd600', HIGH:'#ff1744'};
+  const el = (id) => document.getElementById(id);
+  el('ai-sentiment').textContent = a.sentiment || '—';
+  el('ai-sentiment').style.color = sentColors[a.sentiment] || '#fff';
+  el('ai-confidence').textContent = a.confidence != null ? a.confidence + '%' : '—';
+  el('ai-trend').textContent = a.trend_strength || '—';
+  el('ai-momentum').textContent = a.momentum || '—';
+  el('ai-entry').textContent = a.entry_quality || '—';
+  el('ai-entry').style.color = entryColors[a.entry_quality] || '#fff';
+  el('ai-risk').textContent = a.risk_level || '—';
+  el('ai-risk').style.color = riskColors[a.risk_level] || '#fff';
+  el('ai-support').textContent = a.support ? a.support.toLocaleString('en',{maximumSignificantDigits:6}) : '—';
+  el('ai-resistance').textContent = a.resistance ? a.resistance.toLocaleString('en',{maximumSignificantDigits:6}) : '—';
+  el('ai-insight').textContent = a.insight || '—';
+  el('ai-watch').textContent = a.watch || '—';
+  el('ai-ts').textContent = a.ts ? 'updated ' + new Date(a.ts*1000).toISOString().slice(11,19) + ' UTC' : '';
+}
+
 // ── Boot ──────────────────────────────────────────────────
 initChart();
 renderCoinSelector([], 'auto');
@@ -721,7 +877,7 @@ refresh();
 connectSSE();
 loadOrders();
 loadAILog();
-setInterval(() => { if (_currentSym) refreshChart(_currentSym); }, 5000);
+setInterval(() => { if (_currentSym) refreshEMAOverlay(_currentSym); }, 60 * 1000); // fallback EMA refresh every 60s
 setInterval(loadOrders, 30000);
 setInterval(loadAILog, 60000); // AI cost refreshes every 60s
 </script>
@@ -772,6 +928,7 @@ def update_chart(symbol: str, candles: list, ema9: list, ema21: list):
         "ema9":    ema9,
         "ema21":   ema21,
     }
+    _state["chart_ts"] = time.time()
 
 
 def update_open_pos(pos_info: dict | None):
@@ -779,7 +936,7 @@ def update_open_pos(pos_info: dict | None):
     _state["open_pos"] = pos_info
 
 
-URGENT_ACTIONS = {"FORCE_BTC", "HALT", "CLOSE_ALL", "SWITCH_COIN", "RESUME_AUTO"}  # wake the main loop immediately
+URGENT_ACTIONS = {"FORCE_BTC", "HALT", "CLOSE_ALL", "SWITCH_COIN", "RESUME_AUTO", "SELL"}  # wake the main loop immediately
 
 # Module-level wake event — agent imports and awaits this during its sleep
 wake_event: asyncio.Event | None = None
@@ -801,6 +958,7 @@ class InstructionServer:
         self._app.router.add_get("/api/ai-log",   self._ai_log)
         self._app.router.add_post("/instruction", self._handle)
         self._app.router.add_get("/status",       self._status)
+        self._app.router.add_get("/api/pool",     self._pool_state)
 
     async def _stream(self, request: web.Request) -> web.StreamResponse:
         resp = web.StreamResponse(headers={
@@ -812,13 +970,22 @@ class InstructionServer:
         await resp.prepare(request)
         try:
             while True:
+                # Refresh pool state from file each SSE tick
+                try:
+                    import json as _j
+                    from pathlib import Path as _P
+                    _pf = _P("/tmp/dipu_equity_pool.json")
+                    if _pf.exists():
+                        _state["pool_state"] = _j.loads(_pf.read_text())
+                except Exception:
+                    pass
                 # Exclude chart_data — served separately via /api/chart
                 payload = {k: v for k, v in _state.items()
                            if k not in ("chart_data", "last_log")}
                 payload["last_log"] = _state["last_log"][-80:]
                 data = json.dumps(payload)
                 await resp.write(f"data: {data}\n\n".encode())
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
         except (ConnectionResetError, asyncio.CancelledError):
             pass
         return resp
@@ -931,6 +1098,15 @@ class InstructionServer:
         if not _auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
         return web.json_response({"agent": "dipu", "status": "running"})
+
+    async def _pool_state(self, request: web.Request) -> web.Response:
+        import json as _j
+        from pathlib import Path as _P
+        try:
+            with open("/tmp/dipu_equity_pool.json") as f:
+                return web.json_response(_j.load(f))
+        except Exception:
+            return web.json_response({"slots": {str(i): None for i in range(4)}, "ts": 0})
 
     async def start(self):
         runner = web.AppRunner(self._app)
