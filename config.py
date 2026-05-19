@@ -93,8 +93,8 @@ _RISK = {
  DAILY_DD_LIMIT, MONTHLY_DD_LIMIT, MAX_CONSEC_LOSS) = _RISK[TRADING_MODE]
 
 # ── Entry filters ─────────────────────────────────────────
-MAX_SPREAD_PCT  = 0.0015   # 0.15% — spec aligned
-MIN_VOLUME_USDT = 10_000_000  # spec aligned
+MAX_SPREAD_PCT  = 0.003    # 0.30% — raised to match scanner; low-price coins hit 0.29% on 1 tick
+MIN_VOLUME_USDT = 3_000_000   # lowered to match scanner; 3M catches high-momentum small caps
 MAX_FUNDING     = 0.0010   # 0.1% per 8h — spec aligned
 MAX_SLIPPAGE    = 0.0010   # 0.1% — spec aligned
 
@@ -117,7 +117,7 @@ TP3_PCT = 0.34
 # ── Time exits (5-min cycle checks; 2h target window) ─────
 MAX_TRADE_HOURS_SPOT    = 2   # exit if trade flat after 2h
 MAX_TRADE_HOURS_FUTURES = 2
-CYCLE_SLEEP_SECONDS     = 300  # 5-minute update window
+CYCLE_SLEEP_SECONDS     = 60   # 1-minute update window
 
 # ── Alerts ────────────────────────────────────────────────
 ALERT_WEBHOOK = os.environ.get("DIPU_ALERT_WEBHOOK", "")

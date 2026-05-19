@@ -8,7 +8,8 @@ class PositionSizer:
     @staticmethod
     def calculate(equity: float, entry_price: float, stop_distance: float,
                   size_mult: float, correlated: bool = False,
-                  usdt_available: float | None = None) -> float | None:
+                  usdt_available: float | None = None,
+                  pool_budget: float | None = None) -> float | None:
 
         risk_amount = equity * cfg.RISK_PCT
         if stop_distance <= 0:
@@ -36,6 +37,11 @@ class PositionSizer:
         max_by_trade = (equity * cfg.MAX_TRADE_PCT) / entry_price
         final_qty    = min(adjusted_qty, max_by_trade)
 
+        # Pool budget cap: shared equity pool limits per-agent deployment
+        if pool_budget is not None and pool_budget > 0:
+            max_by_pool = pool_budget / entry_price * 0.98
+            final_qty   = min(final_qty, max_by_pool)
+
         # Spot BUY: cap to free USDT (portfolio equity includes held base asset value)
         if usdt_available is not None and usdt_available > 0:
             max_by_usdt = (usdt_available * 0.98) / entry_price  # 2% buffer for fees
@@ -56,6 +62,7 @@ class PositionSizer:
             equity=equity, risk_amount=risk_amount,
             base_qty=round(base_qty, 6), vol_mult=vol_mult,
             size_mult=size_mult, final_qty=round(final_qty, 6),
-            usdt_cap=round(usdt_available, 2) if usdt_available else None)
+            usdt_cap=round(usdt_available, 2) if usdt_available else None,
+            pool_cap=round(pool_budget, 2) if pool_budget else None)
 
         return final_qty

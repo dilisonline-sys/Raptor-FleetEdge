@@ -16,9 +16,9 @@ from logger import log
 import config as cfg
 
 SCAN_INTERVAL   = 300        # re-rank every 5 minutes (matches cycle)
-MIN_VOLUME_USDT = 10_000_000 # spec minimum — filters illiquid noise
+MIN_VOLUME_USDT = 3_000_000  # lowered to catch high-momentum small caps (e.g. RAD +9% 1h)
 MIN_PRICE_CHG   = 1.0        # need at least 1% move — momentum only
-MAX_SPREAD_PCT  = 0.15       # pre-filter tight spread
+MAX_SPREAD_PCT  = 0.30       # raised — low-price coins (e.g. $0.30) hit 0.29% spread on 1 tick
 TOP_N           = 12         # score top 12 candidates with indicators
 BLACKLIST       = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT",
                    "USD1USDT", "USDTUSDT"}  # stablecoins + tether pairs
@@ -72,8 +72,9 @@ class MarketScanner:
                 spread_pct = (ask_price - bid_price) / mid_p * 100 if mid_p else 99
                 if spread_pct > MAX_SPREAD_PCT:
                     continue
+                chg_24h = abs(float(t.get("priceChangePercent", 0)))
                 pre.append({"symbol": sym, "price": price, "spread_pct": spread_pct,
-                             "vol_24h": vol})
+                             "vol_24h": vol, "chg_24h": chg_24h})
             except (ValueError, KeyError):
                 continue
 
@@ -81,12 +82,19 @@ class MarketScanner:
             return []
 
         # ── Step 2: 1h rolling ticker for the shortlist ───────────────
-        # Limit to top 80 by 24h volume to keep the batch call small.
-        # Build URL manually — aiohttp's params dict doesn't reliably encode JSON arrays
-        # for Binance's symbols parameter.
+        # Two-pool batch: top 60 by 24h volume (liquid coins) + top 60 by 24h abs %
+        # change (momentum coins). Deduped. Ensures high-momentum small caps like RAD
+        # (+9% 1h but low 24h vol) are always included alongside the liquid heavyweights.
+        # Build URL manually — aiohttp's params dict doesn't reliably encode JSON arrays.
         import urllib.parse as _up
-        pre.sort(key=lambda x: x["vol_24h"], reverse=True)
-        batch    = pre[:80]
+        pre_by_vol = sorted(pre, key=lambda x: x["vol_24h"], reverse=True)
+        pre_by_chg = sorted(pre, key=lambda x: abs(x.get("chg_24h", 0)), reverse=True)
+        seen = set()
+        batch = []
+        for c in pre_by_vol[:60] + pre_by_chg[:60]:
+            if c["symbol"] not in seen:
+                seen.add(c["symbol"])
+                batch.append(c)
         sym_json = _json.dumps([c["symbol"] for c in batch], separators=(',', ':'))
         url_1h   = (cfg.PUBLIC_DATA_URL + "/api/v3/ticker"
                     + "?windowSize=1h&symbols=" + _up.quote(sym_json))

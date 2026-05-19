@@ -31,6 +31,8 @@ _agents: dict[str, dict] = {}
 # Available coins fetched from Binance at startup — sorted by 24h volume
 _available_coins: list[str] = []
 BINANCE_PUBLIC = "https://api.binance.com"
+LIVE_PORTS  = {0: 7434, 1: 7435, 2: 7436, 3: 7437}  # slot → dashboard port
+POOL_FILE   = "/tmp/dipu_equity_pool.json"
 COIN_BLACKLIST  = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT", "USDPUSDT"}
 
 
@@ -91,8 +93,13 @@ def _load_state():
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
+        # Zombies respond to kill(0) but are effectively dead
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("State:") and "Z" in line:
+                    return False
         return True
-    except (ProcessLookupError, PermissionError):
+    except (ProcessLookupError, PermissionError, FileNotFoundError, OSError):
         return False
 
 
@@ -105,22 +112,24 @@ def _agent_status(name: str) -> str:
     return "stopped"
 
 
-def _spawn(name: str, mode: str, port: int, symbol: str = "BTCUSDT") -> dict | None:
+def _spawn(name: str, mode: str, port: int, symbol: str = "BTCUSDT", slot: int = 0) -> dict | None:
     log_file = f"/tmp/dipu_{name}.log"
     env = {**os.environ,
            "TRADING_MODE":  mode,
            "AGENT_NAME":    name,
            "AGENT_PORT":    str(port),
-           "AGENT_SYMBOL":  symbol.upper()}
+           "AGENT_SYMBOL":  symbol.upper(),
+           "AGENT_SLOT":    str(slot)}
     try:
         proc = subprocess.Popen(
             [sys.executable, str(AGENT_SCRIPT)],
             env=env,
             stdout=open(log_file, "w"),
             stderr=subprocess.STDOUT,
+            start_new_session=True,   # detach from manager — prevents zombie accumulation
         )
         info = {"pid": proc.pid, "port": port, "mode": mode, "symbol": symbol.upper(),
-                "started_at": time.time(), "log_file": log_file, "name": name}
+                "started_at": time.time(), "log_file": log_file, "name": name, "slot": slot}
         _agents[name] = info
         _save_state()
         return info
@@ -184,6 +193,25 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 .card-actions{display:flex;gap:8px;flex-wrap:wrap}
 .status-bar{margin-top:14px;font-size:.65rem;color:#fff;border-top:1px solid #141414;padding-top:10px}
 .no-agents{color:#fff;font-size:.8rem;padding:20px 0}
+/* Fleet panel */
+.fleet-panel{background:#080808;border:1px solid #1a1a1a;border-radius:9px;padding:18px;margin-bottom:28px}
+.fleet-header{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.fleet-title{color:#ff1744;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;font-weight:bold}
+.fleet-eq{color:#00e5ff;font-size:.95rem;font-weight:bold;margin-left:4px}
+.fleet-dd{font-size:.72rem;color:#aaa}
+.fleet-controls{margin-left:auto;display:flex;gap:8px}
+.slot-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:900px){.slot-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:500px){.slot-grid{grid-template-columns:1fr}}
+.slot-card{background:#0e0e0e;border:1px solid #1e1e1e;border-radius:8px;padding:14px;min-height:130px;position:relative}
+.slot-card.live{border-color:#1a3a2a}
+.slot-card.empty{opacity:.55}
+.slot-num{font-size:.62rem;color:#555;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px}
+.slot-sym{font-size:1.1rem;font-weight:bold;color:#fff;margin-bottom:6px}
+.slot-sym.active{color:#00e676}
+.slot-meta{font-size:.68rem;color:#aaa;line-height:1.8;margin-bottom:10px}
+.slot-meta .g{color:#00e676}.slot-meta .r{color:#ff1744}
+.slot-actions{display:flex;gap:6px;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -215,6 +243,22 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
   </div>
   <button class="btn btn-spawn" onclick="spawnAgent()">&#9654; Spawn</button>
   <span id="spawn-msg" style="font-size:.72rem;color:#00e676;align-self:center"></span>
+</div>
+
+<h2>&#9646; Live Fleet</h2>
+<div class="fleet-panel">
+  <div class="fleet-header">
+    <span class="fleet-title">&#9889; Live Trading Pool</span>
+    <span class="fleet-eq" id="fleet-eq">—</span>
+    <span class="fleet-dd" id="fleet-dd"></span>
+    <div class="fleet-controls">
+      <button class="btn btn-spawn" onclick="spawnFleet()">&#9889; Launch Fleet</button>
+      <button class="btn btn-stop"  onclick="stopAllLive()">&#9646;&#9646; Stop All Live</button>
+    </div>
+  </div>
+  <div class="slot-grid" id="fleet-slots">
+    <div style="color:#555;font-size:.75rem;grid-column:1/-1">Loading fleet state…</div>
+  </div>
 </div>
 
 <h2>&#9646; Running agents</h2>
@@ -291,6 +335,25 @@ async function spawnAgent() {
   loadAgents();
 }
 
+const _aiStates = {};
+async function toggleAI(name, port) {
+  const on = !_aiStates[name];
+  _aiStates[name] = on;
+  const action = on ? 'AI_ANALYST_ON' : 'AI_ANALYST_OFF';
+  await fetch(`/agent/${name}/instruction`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
+    body: JSON.stringify({action, source:'manager'}),
+  });
+  const btn = document.getElementById(`ai-btn-${name}`);
+  if (btn) {
+    btn.style.background    = on ? '#0a2010' : '#0a0f0a';
+    btn.style.borderColor   = on ? '#00e676' : '#1a3a1a';
+    btn.style.color         = on ? '#00e676' : '#4caf50';
+    btn.textContent         = on ? '■ AI ON' : '■ AI';
+  }
+}
+
 async function stopAgent(name) {
   if (!confirm(`Stop agent "${name}"?`)) return;
   await fetch('/api/stop', {
@@ -324,6 +387,117 @@ async function loadCoins() {
   }
 }
 
+async function loadPool() {
+  try {
+    const r = await fetch('/api/pool');
+    const d = await r.json();
+    renderFleet(d);
+  } catch(e) {
+    document.getElementById('fleet-slots').innerHTML = '<div style="color:#555;font-size:.75rem;grid-column:1/-1">Pool offline</div>';
+  }
+}
+
+function renderFleet(pool) {
+  const slots = pool.slots || {};
+  let totalOpen = 0, totalPnl = 0, activeCount = 0;
+  Object.values(slots).forEach(s => {
+    if (s) { totalOpen += s.open_usdt||0; totalPnl += s.daily_pnl||0; activeCount++; }
+  });
+
+  const eqEl = document.getElementById('fleet-eq');
+  const ddEl = document.getElementById('fleet-dd');
+  if (activeCount > 0) {
+    eqEl.textContent = 'Open: $' + totalOpen.toFixed(2) + '  ·  ' + activeCount + ' agent' + (activeCount>1?'s':'') + ' running';
+    ddEl.textContent = 'Daily P&L: ' + (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
+    ddEl.style.color  = totalPnl >= 0 ? '#00e676' : '#ff1744';
+  } else {
+    eqEl.textContent = 'No live agents';
+    ddEl.textContent = '';
+  }
+
+  const grid = document.getElementById('fleet-slots');
+  let html = '';
+  for (let i = 0; i < 4; i++) {
+    const s = slots[String(i)];
+    const port = s ? (s.port || (7434 + (i===0?0:i))) : (7434 + (i===0?0:i));
+    const pnl  = s ? (s.daily_pnl||0) : 0;
+    const pnlStr = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+    const pnlCls = pnl >= 0 ? 'g' : 'r';
+    const name   = i === 0 ? 'dipu-live' : 'dipu-live-' + i;
+    if (s) {
+      html += `<div class="slot-card live">
+        <div class="slot-num">Slot ${i} &nbsp;&#9679;&nbsp; :${port}</div>
+        <div class="slot-sym active">${s.symbol || '—'}</div>
+        <div class="slot-meta">
+          Open: $${(s.open_usdt||0).toFixed(2)}<br>
+          P&L: <span class="${pnlCls}">${pnlStr}</span>
+        </div>
+        <div class="slot-actions">
+          <button class="btn btn-open" onclick="window.open('/agent/${name}/','_blank')">&#9654; Dashboard</button>
+          <button id="ai-btn-${name}" class="btn" onclick="toggleAI('${name}','${port}')"
+            style="font-size:.65rem;padding:4px 8px;background:#0a0f0a;border:1px solid #1a3a1a;color:#4caf50;cursor:pointer">&#9632; AI</button>
+          <button class="btn btn-stop" onclick="stopAgent('${name}')" style="padding:6px 10px;font-size:.68rem">&#9646;&#9646;</button>
+        </div>
+      </div>`;
+    } else {
+      html += `<div class="slot-card empty">
+        <div class="slot-num">Slot ${i} &nbsp;&#9675;&nbsp; :${port}</div>
+        <div class="slot-sym" style="color:#333">empty</div>
+        <div class="slot-meta" style="color:#333">—<br>—</div>
+        <div class="slot-actions">
+          <button class="btn btn-spawn" onclick="spawnSlot(${i})" style="font-size:.68rem">&#9654; Spawn</button>
+        </div>
+      </div>`;
+    }
+  }
+  grid.innerHTML = html;
+}
+
+async function spawnFleet() {
+  const msg = document.getElementById('spawn-msg');
+  msg.textContent = '⚡ Scanning top coins and launching fleet…';
+  try {
+    const r = await fetch('/api/spawn-fleet', {method:'POST'});
+    const d = await r.json();
+    const ok = d.agents.filter(a => a.status === 'spawned').length;
+    const skip = d.agents.filter(a => a.status === 'already_running').length;
+    msg.textContent = `✓ Fleet launched — ${ok} spawned, ${skip} already running | top4: ${d.top4.join(', ')}`;
+  } catch(e) {
+    msg.textContent = '✗ Fleet launch failed: ' + e.message;
+  }
+  setTimeout(() => msg.textContent = '', 8000);
+  loadAgents(); loadPool();
+}
+
+async function spawnSlot(slot) {
+  const name = slot === 0 ? 'dipu-live' : 'dipu-live-' + slot;
+  const port = [7434,7435,7436,7437][slot];
+  const r = await fetch('/api/spawn-fleet', {method:'POST'});
+  const d = await r.json();
+  const agent = d.agents.find(a => a.slot === slot);
+  if (agent && agent.status === 'spawned') {
+    document.getElementById('spawn-msg').textContent = `✓ Slot ${slot} spawned: ${agent.symbol}`;
+    setTimeout(() => document.getElementById('spawn-msg').textContent = '', 4000);
+  }
+  loadAgents(); loadPool();
+}
+
+async function stopAllLive() {
+  if (!confirm('Stop ALL live trading agents?')) return;
+  const r = await fetch('/api/agents');
+  const agents = await r.json();
+  const live = agents.filter(a => a.mode === 'live' && a.status === 'running');
+  for (const a of live) {
+    await fetch('/api/stop', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: a.name}),
+    });
+  }
+  loadAgents(); loadPool();
+}
+
+loadPool();
+setInterval(loadPool, 5000);
 loadCoins();
 loadAgents();
 setInterval(loadAgents, 5000);
@@ -342,6 +516,8 @@ class AgentManager:
         self._app.router.add_get("/api/coins",           self._coins)
         self._app.router.add_post("/api/spawn",          self._spawn)
         self._app.router.add_post("/api/stop",           self._stop)
+        self._app.router.add_get("/api/pool",          self._pool)
+        self._app.router.add_post("/api/spawn-fleet",  self._spawn_fleet)
         self._app.router.add_route("*", "/agent/{name}/{path:.*}", self._proxy)
 
     async def _dashboard(self, _):
@@ -365,6 +541,7 @@ class AgentManager:
         mode   = body.get("mode", "testnet")
         port   = int(body.get("port", MODE_META.get(mode, (7432,))[0]))
         symbol = body.get("symbol", "BTCUSDT").upper().strip() or "BTCUSDT"
+        slot   = int(body.get("slot", 0))
 
         if not name:
             return web.json_response({"error": "name required"}, status=400)
@@ -373,7 +550,7 @@ class AgentManager:
         if name in _agents and _pid_alive(_agents[name].get("pid", 0)):
             return web.json_response({"error": f"{name} already running"}, status=409)
 
-        info = _spawn(name, mode, port, symbol)
+        info = _spawn(name, mode, port, symbol, slot=slot)
         if not info:
             return web.json_response({"error": "failed to spawn"}, status=500)
         return web.json_response({"ok": True, **info})
@@ -446,6 +623,97 @@ class AgentManager:
                                     content_type=ct.split(";")[0])
         except Exception as e:
             return web.Response(text=f"Proxy error: {e}", status=502)
+
+    async def _pool(self, _) -> web.Response:
+        import json as _j
+        try:
+            with open(POOL_FILE) as f:
+                data = _j.load(f)
+            # Enrich with agent port/name from _agents
+            for name, info in _agents.items():
+                if info.get("mode") == "live":
+                    slot = str(info.get("slot", 0))
+                    if data["slots"].get(slot):
+                        data["slots"][slot]["agent_name"] = name
+                        data["slots"][slot]["port"]       = info["port"]
+            return web.json_response(data)
+        except Exception:
+            return web.json_response({"slots": {str(i): None for i in range(4)}, "ts": 0})
+
+    async def _spawn_fleet(self, request: web.Request) -> web.Response:
+        """Fetch top 4 coins from Binance and spawn live agents for empty slots."""
+        import json as _j, urllib.parse as _up, aiohttp as _aio
+        # Fetch top 4 by 1h momentum
+        try:
+            async with _aio.ClientSession() as s:
+                async with s.get(BINANCE_PUBLIC + "/api/v3/ticker/24hr",
+                                 timeout=_aio.ClientTimeout(total=15)) as r:
+                    tickers = await r.json()
+            BLACKLIST = {"BUSDUSDT","USDCUSDT","TUSDUSDT","FDUSDUSDT","USD1USDT","USDTUSDT"}
+            pre = []
+            for t in tickers:
+                sym = t.get("symbol","")
+                if not sym.endswith("USDT") or sym in BLACKLIST or not sym.isascii():
+                    continue
+                try:
+                    vol = float(t["quoteVolume"])
+                    if vol < 3_000_000: continue
+                    price = float(t["lastPrice"])
+                    bid   = float(t.get("bidPrice") or price)
+                    ask   = float(t.get("askPrice") or price)
+                    mid   = (bid+ask)/2
+                    spread = (ask-bid)/mid*100 if mid else 99
+                    if spread > 0.30: continue
+                    chg_24h = abs(float(t.get("priceChangePercent",0)))
+                    pre.append({"symbol": sym, "vol_24h": vol, "chg_24h": chg_24h})
+                except: pass
+            by_vol = sorted(pre, key=lambda x: x["vol_24h"], reverse=True)
+            by_chg = sorted(pre, key=lambda x: x["chg_24h"], reverse=True)
+            seen = set(); batch = []
+            for c in by_vol[:60] + by_chg[:60]:
+                if c["symbol"] not in seen:
+                    seen.add(c["symbol"]); batch.append(c)
+            syms = _j.dumps([c["symbol"] for c in batch], separators=(',',':'))
+            url  = BINANCE_PUBLIC + "/api/v3/ticker?windowSize=1h&symbols=" + _up.quote(syms)
+            async with _aio.ClientSession() as s:
+                async with s.get(url, timeout=_aio.ClientTimeout(total=15)) as r:
+                    t1h = await r.json()
+            results = []
+            for t in (t1h if isinstance(t1h, list) else []):
+                try:
+                    chg = abs(float(t["priceChangePercent"]))
+                    vol = float(t["quoteVolume"])
+                    h = float(t["highPrice"]); lo = float(t["lowPrice"]); p = float(t["lastPrice"]) or 1
+                    if chg < 0.3 or vol < 500_000: continue
+                    rng = (h - lo) / p
+                    score = chg * (vol / 1e7) * rng
+                    results.append({"symbol": t["symbol"], "score": score})
+                except: pass
+            results.sort(key=lambda x: x["score"], reverse=True)
+            top4 = [r["symbol"] for r in results[:4]]
+        except Exception as e:
+            top4 = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]
+
+        # Slot 0 is permanently BTC; fill the other 3 from top momentum picks (excluding BTC)
+        top3_others = [s for s in top4 if s != "BTCUSDT"][:3]
+        while len(top3_others) < 3:
+            top3_others.append("ETHUSDT")
+        top4 = ["BTCUSDT"] + top3_others
+
+        spawned = []
+        for slot, sym in enumerate(top4):
+            port = LIVE_PORTS[slot]
+            name = f"dipu-live-{slot}" if slot > 0 else "dipu-live"
+            if name in _agents and _pid_alive(_agents[name].get("pid", 0)):
+                spawned.append({"slot": slot, "name": name, "status": "already_running", "symbol": _agents[name].get("symbol","")})
+                continue
+            info = _spawn(name, "live", port, sym, slot=slot)
+            if info:
+                spawned.append({"slot": slot, "name": name, "status": "spawned", "symbol": sym, "port": port})
+            else:
+                spawned.append({"slot": slot, "name": name, "status": "failed"})
+
+        return web.json_response({"ok": True, "agents": spawned, "top4": top4})
 
     async def start(self):
         runner = web.AppRunner(self._app)

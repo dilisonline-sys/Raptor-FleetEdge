@@ -180,6 +180,8 @@ class MarketData:
         ind["vwap"]        = (vp / df["volume"].cumsum()).iloc[-1]
         ind["close"]       = float(c.iloc[-1])   # current close — use this for EMA/BB comparisons
         ind["open"]        = float(df["open"].iloc[-1])   # last candle open — for candle body filter
+        # 1h range: max-high minus min-low of the last 4 × 15m candles (= 1 hour of actual price action)
+        ind["h1_range"]    = float(df["high"].iloc[-4:].max() - df["low"].iloc[-4:].min())
         return ind
 
     def quality_gate(self, tick: dict, book: dict) -> bool:
