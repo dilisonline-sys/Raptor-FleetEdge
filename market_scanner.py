@@ -23,6 +23,10 @@ TOP_N           = 12         # score top 12 candidates with indicators
 BLACKLIST       = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT",
                    "USD1USDT", "USDTUSDT"}  # stablecoins + tether pairs
 
+def _is_valid_symbol(sym: str) -> bool:
+    """Reject non-ASCII symbols (promotional/meme tokens like 币安人生USDT)."""
+    return sym.isascii()
+
 
 class MarketScanner:
     def __init__(self):
@@ -47,7 +51,7 @@ class MarketScanner:
         candidates = []
         for t in tickers:
             sym = t.get("symbol", "")
-            if not sym.endswith("USDT") or sym in BLACKLIST:
+            if not sym.endswith("USDT") or sym in BLACKLIST or not _is_valid_symbol(sym):
                 continue
             try:
                 vol       = float(t["quoteVolume"])
@@ -113,9 +117,12 @@ class MarketScanner:
             msig  = _macd[msig_col].dropna().iloc[-1] if msig_col in _macd and len(_macd[msig_col].dropna()) else 0
             price = c.iloc[-1]
 
-            # Volatility score: ATR%/price — primary driver for momentum strategy
+            # Volatility score: bell-curve centred on 2.0% ATR.
+            # Coins under 0.5% are too quiet to reach TP; coins over 3% blow stops on noise.
+            # Peak score = 10 at 2.0% ATR, decays toward extremes.
             atr_pct    = atr / price * 100
-            vol_score  = min(atr_pct * 2.0, 10.0)  # double-weight ATR, cap at 10
+            import math as _math
+            vol_score  = 10.0 * _math.exp(-0.5 * ((atr_pct - 2.0) / 1.2) ** 2)
 
             # Trend score: TRENDING regime only is valid — hard penalise no-trend
             trend_up   = e9 > e21 > e50 and macd > msig

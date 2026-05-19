@@ -464,7 +464,15 @@ async def main_loop():
             # ── RANGING: immediately rotate to the next best ranked coin ─────
             if regime == "RANGING" and not em.positions:
                 coin_mode = _state.get("coin_mode", "auto")
-                if coin_mode == "auto" and scanner.ranked:
+                # A named coin_mode (e.g. "BTCUSDT") means "start here" not "stay forever".
+                # When that coin is ranging with no scanner data yet, sit out.
+                # When scanner has better candidates, escape to auto and rotate.
+                _locked_coin = coin_mode if coin_mode not in ("auto", None) else None
+                _can_escape  = coin_mode == "auto" or (
+                    _locked_coin and scanner.ranked and
+                    scanner.ranked[0]["symbol"] != active_symbol
+                )
+                if _can_escape and scanner.ranked:
                     _ranked_idx = (_ranked_idx + 1) % len(scanner.ranked)
                     next_sym    = scanner.ranked[_ranked_idx]["symbol"]
                     if next_sym != active_symbol:
@@ -475,12 +483,13 @@ async def main_loop():
                         active_symbol      = next_sym
                         md                 = MarketData(active_symbol, cfg.INTERVAL)
                         await md.connect()
-                        update_state(symbol=active_symbol)
+                        # Unlock coin_mode to auto so scanner drives future rotation
+                        update_state(symbol=active_symbol, coin_mode="auto")
                         none_signal_streak = 0
                     else:
                         push_log(f"[RANGING_ESCAPE] {active_symbol} RANGING — no better coin available, sitting out")
                 else:
-                    push_log(f"[RANGING] {active_symbol} is RANGING — manual mode or no scanner data, sitting out")
+                    push_log(f"[RANGING] {active_symbol} is RANGING — sitting out (no scanner data yet)")
                 await _cycle_sleep()
                 continue
 
@@ -620,6 +629,18 @@ async def main_loop():
                 await _cycle_sleep()
                 continue
 
+            # Re-check risk state immediately after any position close in this cycle.
+            # Prevents entering a new trade in the same cycle a stop-loss was hit — the daily
+            # DD limit may have just been breached (as happened: FIDA stop → AIGENSYN entry).
+            if not em.positions:
+                _post_close_equity = await om.get_equity(symbol=active_symbol, price=current_price)
+                risk.update_metrics(_post_close_equity)
+                if risk.halt_active():
+                    update_state(halt=True)
+                    push_log(f"[HALT] Daily DD limit reached after exit — no new entries this session")
+                    await _cycle_sleep()
+                    continue
+
             # Spot mode: only BUY can open a new position (no naked short selling)
             if signal == "BUY" and not em.positions:
                 import time as _t
@@ -639,6 +660,13 @@ async def main_loop():
                 min_tp_dist = current_price * 0.0022  # 0.22% = round-trip fees (2×0.1%) + 0.02% margin
                 if tp1_dist < min_tp_dist:
                     push_log(f"[SKIP] {active_symbol} TP1 too close ({tp1_dist/current_price*100:.3f}%) — won't cover fees")
+                    signal = "NONE"
+                # ATR cap: reject extremely volatile coins — the same volatility that scores them
+                # high will blow through stops on normal noise (FIDA: 4.1% ATR → stop hit -11%)
+                MAX_ENTRY_ATR_PCT = 3.0
+                atr_pct_live = indicators["atr14"] / current_price * 100
+                if signal == "BUY" and atr_pct_live > MAX_ENTRY_ATR_PCT:
+                    push_log(f"[SKIP] {active_symbol} ATR {atr_pct_live:.2f}% > {MAX_ENTRY_ATR_PCT}% cap — too volatile to enter safely")
                     signal = "NONE"
 
             if signal == "BUY" and not em.positions:
