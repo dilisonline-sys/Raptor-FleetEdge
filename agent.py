@@ -345,6 +345,22 @@ async def main_loop():
             pass
         _wake.clear()
 
+    async def _liquidate_before_switch(symbol: str) -> None:
+        """Sell any remaining base asset back to USDT before rotating to a new coin.
+        Never called for slot 0 (BTC-locked). Silently skips if balance is below min notional."""
+        try:
+            _tick = await md.get_ticker()
+            _price = _tick.get("price", 0)
+            base_bal = await om.get_base_balance(symbol)
+            min_qty = 11.0 / _price if _price > 0 else 0
+            if base_bal > min_qty:
+                push_log(f"[PRE_SWITCH] Liquidating {base_bal:.6f} {symbol[:-4]} → USDT before rotation")
+                log("AGENT", "PRE_SWITCH_SELL", symbol=symbol, qty=round(base_bal, 6))
+                await om.submit("SELL", base_bal, _tick, {}, symbol=symbol)
+                await asyncio.sleep(1.5)
+        except Exception as _liq_e:
+            log("AGENT", "PRE_SWITCH_SELL_ERROR", symbol=symbol, error=str(_liq_e))
+
     log("AGENT", "READY", symbol=active_symbol, testnet=cfg.USE_TESTNET, equity=round(equity, 2))
     update_state(equity=equity, symbol=active_symbol)
 
@@ -460,6 +476,8 @@ async def main_loop():
                         # Manual override — switch to requested coin immediately
                         push_log(f"[COIN_SELECT] Manual override → {requested}")
                         log("AGENT", "COIN_MANUAL", symbol=requested, source=instr.get("source",""))
+                        if _agent_slot != 0:
+                            await _liquidate_before_switch(active_symbol)
                         await md.close()
                         active_symbol = requested
                         md = MarketData(active_symbol, cfg.INTERVAL)
@@ -507,6 +525,7 @@ async def main_loop():
                 if new_symbol != active_symbol:
                     push_log(f"[SWITCH] {active_symbol} → {new_symbol} | top5={top5}")
                     log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol, top5=top5)
+                    await _liquidate_before_switch(active_symbol)
                     await md.close()
                     active_symbol = new_symbol
                     md = MarketData(active_symbol, cfg.INTERVAL)
@@ -540,6 +559,7 @@ async def main_loop():
                         log("AGENT", "GATE_FAIL_SWITCH", symbol=active_symbol, streak=gate_fail_streak)
                         new_symbol = await scanner.scan(exclude={active_symbol}, force=True)
                         if new_symbol != active_symbol:
+                            await _liquidate_before_switch(active_symbol)
                             await md.close()
                             active_symbol = new_symbol
                             md = MarketData(active_symbol, cfg.INTERVAL)
@@ -657,6 +677,7 @@ async def main_loop():
                         push_log(f"[RANGING_ESCAPE] {active_symbol} is RANGING — rotating to {next_sym}")
                         log("AGENT", "RANGING_ESCAPE", from_=active_symbol, to=next_sym,
                             idx=_ranked_idx)
+                        await _liquidate_before_switch(active_symbol)
                         await md.close()
                         active_symbol      = next_sym
                         md                 = MarketData(active_symbol, cfg.INTERVAL)
@@ -692,6 +713,7 @@ async def main_loop():
                             push_log(f"[SWITCH] {active_symbol} → {new_symbol} (volatile escape)")
                             log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol,
                                 reason="volatile_escape")
+                            await _liquidate_before_switch(active_symbol)
                             await md.close()
                             active_symbol = new_symbol
                             md = MarketData(active_symbol, cfg.INTERVAL)
@@ -787,6 +809,7 @@ async def main_loop():
                         push_log(f"[ROTATE] {active_symbol}: {_rotate_reason} — switching to {next_sym}")
                         log("AGENT", "SIGNAL_ROTATE", from_=active_symbol, to=next_sym,
                             streak=none_signal_streak, idx=_ranked_idx)
+                        await _liquidate_before_switch(active_symbol)
                         await md.close()
                         active_symbol      = next_sym
                         md                 = MarketData(active_symbol, cfg.INTERVAL)
@@ -819,6 +842,8 @@ async def main_loop():
                 if target != active_symbol:
                     push_log(f"[FORCE_SWITCH] {active_symbol} → {target}")
                     log("AGENT", "FORCE_SWITCH", from_=active_symbol, to=target)
+                    if _agent_slot != 0:
+                        await _liquidate_before_switch(active_symbol)
                     await md.close()
                     active_symbol = target
                     md = MarketData(active_symbol, cfg.INTERVAL)
