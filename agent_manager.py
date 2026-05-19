@@ -913,12 +913,28 @@ class AgentManager:
                 print(f"[manager] P&L report error: {e}")
             await asyncio.sleep(INTERVAL)
 
+    async def _log_cleaner_scheduler(self):
+        """Trim all dipu log files to the last 24 hours, every 6 hours."""
+        INTERVAL = 6 * 3600
+        await asyncio.sleep(60)  # brief startup delay — let agents write their first lines
+        while True:
+            try:
+                import log_cleaner as _lc
+                loop    = asyncio.get_event_loop()
+                summary = await loop.run_in_executor(None, _lc.clean_logs)
+                total_dropped = sum(v.get("dropped", 0) for v in summary.values() if isinstance(v, dict))
+                print(f"[manager] log_cleaner: trimmed {total_dropped} old entries across {len(summary)} files")
+            except Exception as e:
+                print(f"[manager] log_cleaner error: {e}")
+            await asyncio.sleep(INTERVAL)
+
     async def start(self):
         runner = web.AppRunner(self._app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", MANAGER_PORT)
         await site.start()
         asyncio.create_task(self._pnl_report_scheduler())
+        asyncio.create_task(self._log_cleaner_scheduler())
         print(f"[manager] running on :{MANAGER_PORT}")
 
 
