@@ -93,8 +93,9 @@ _RISK = {
  DAILY_DD_LIMIT, MONTHLY_DD_LIMIT, MAX_CONSEC_LOSS) = _RISK[TRADING_MODE]
 
 # ── Entry filters ─────────────────────────────────────────
-MAX_SPREAD_PCT  = 0.003    # 0.30% — raised to match scanner; low-price coins hit 0.29% on 1 tick
-MIN_VOLUME_USDT = 3_000_000   # lowered to match scanner; 3M catches high-momentum small caps
+MAX_SPREAD_PCT  = 0.003    # 0.30%
+MIN_VOLUME_USDT = 15_000_000  # $15M 24h volume — filters out micro-caps that spike and reverse
+MIN_PRICE       = 0.05    # reject coins below $0.05 — sub-penny coins have poor spread behaviour
 MAX_FUNDING     = 0.0010   # 0.1% per 8h — spec aligned
 MAX_SLIPPAGE    = 0.0010   # 0.1% — spec aligned
 

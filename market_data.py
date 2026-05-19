@@ -190,6 +190,8 @@ class MarketData:
             reasons.append(f"spread {book['spread_pct']:.4f}% > limit")
         if tick["volume_usdt"] < cfg.MIN_VOLUME_USDT:
             reasons.append(f"volume {tick['volume_usdt']:.0f} < limit")
+        if tick["price"] < cfg.MIN_PRICE:
+            reasons.append(f"price {tick['price']:.5f} < min {cfg.MIN_PRICE}")
         imb_lo, imb_hi = (0.02, 0.98)  # practical: BTC runs 0.95+ naturally, only block extreme wash
         if book["imbalance"] < imb_lo or book["imbalance"] > imb_hi:
             reasons.append(f"book imbalance {book['imbalance']:.2f}")
