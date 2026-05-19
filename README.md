@@ -281,6 +281,75 @@ Agents in slots 1–3 automatically rotate to the best-ranked coin when:
 
 ---
 
+## Email Notifications
+
+dipu can send email alerts for key events. Configure it from the manager dashboard at `http://localhost:7430` (scroll to the **Email Notifications** panel) or via the API.
+
+### What gets notified
+
+| Event | Toggle |
+|---|---|
+| Coin rotation | Any time an agent switches to a new coin (with reason) |
+| Order fills | BUY entries, SELL exits, TP1/TP2 partial closes |
+| Coin traded | When the active coin changes |
+| 4h P&L report | Automatically every 4 hours — full fleet summary |
+
+### Gmail setup (recommended)
+
+1. Enable **2-Step Verification** on your Google account
+2. Go to **myaccount.google.com/apppasswords**
+3. Create an App Password — name it `dipu`
+4. Copy the 16-character password (format: `xxxx xxxx xxxx xxxx`)
+
+### Configure via dashboard
+
+Open `http://localhost:7430`, scroll to **Email Notifications**, fill in:
+- **Recipient** — address to receive alerts
+- **Sender (Gmail)** — the Gmail address sending the emails
+- **App password** — the 16-char app password from step above
+- Select which events to be notified about
+- Check **Enable email notifications** and click **Save**
+- Click **Test email** to verify delivery
+
+### Configure via API
+
+```bash
+curl -X POST http://localhost:7430/api/email-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": true,
+    "recipient": "you@example.com",
+    "smtp_user": "sender@gmail.com",
+    "smtp_password": "xxxx xxxx xxxx xxxx",
+    "notifications": {
+      "coin_rotation": true,
+      "order_fills":   true,
+      "coin_traded":   true,
+      "pnl_report":    true
+    }
+  }'
+```
+
+Send a test email:
+
+```bash
+curl -X POST http://localhost:7430/api/email-test \
+  -H "Content-Type: application/json" \
+  -d '{"recipient": "you@example.com"}'
+```
+
+Trigger a P&L report immediately:
+
+```bash
+curl -X POST http://localhost:7430/api/email-pnl
+```
+
+### Using other SMTP providers
+
+The default is Gmail (`smtp.gmail.com:587`). To use another provider, POST the `smtp_host` and `smtp_port` fields in the config call above.
+
+---
+
 ## Sending Instructions to Agents
 
 Each agent accepts POST instructions at `/instruction`. Valid actions:
