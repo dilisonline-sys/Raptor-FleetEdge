@@ -198,11 +198,18 @@ def run_check() -> dict:
 
         slot_report[slot_id] = entry
 
+    try:
+        import portfolio_tracker as _pt
+        pf = _pt.get_portfolio_state()
+    except Exception:
+        pf = {}
+
     return {
-        "ts":      _now_utc(),
-        "issues":  issues,
-        "slots":   slot_report,
-        "healthy": len(issues) == 0,
+        "ts":        _now_utc(),
+        "issues":    issues,
+        "slots":     slot_report,
+        "healthy":   len(issues) == 0,
+        "portfolio": pf,
     }
 
 
@@ -230,6 +237,21 @@ def write_report(result: dict) -> str:
             f"  Slot {sid} {s['name']:14s}  {s['symbol']:12s} "
             f"P&L {pnl_sign}${s['daily_pnl']:.2f}  open ${s['open_usdt']:.2f}"
             f"{halted_tag}{errs_tag}"
+        )
+
+    pf = result.get("portfolio", {})
+    if pf and pf.get("total_assets"):
+        pnl_sign = "+" if pf.get("pnl_usdt", 0) >= 0 else ""
+        lines.append("")
+        lines.append("  PORTFOLIO")
+        lines.append("  " + "-" * 60)
+        lines.append(
+            f"  Total ${pf['total_assets']:.2f}  "
+            f"USDT ${pf.get('usdt_free', 0):.2f}  "
+            f"Spot ${pf.get('coin_value', 0):.2f}  "
+            f"Earn ${pf.get('earn_value', 0):.2f}  "
+            f"Day P&L {pnl_sign}${pf['pnl_usdt']:.2f} ({pnl_sign}{pf.get('pnl_pct', 0):.2f}%)  "
+            f"Start ${pf.get('day_start', 0):.2f}"
         )
 
     if result["issues"]:
@@ -283,11 +305,37 @@ def send_monitor_email(result: dict) -> bool:
             tag_html = " ".join(tags) if tags else '<span style="color:#444">OK</span>'
             slot_rows += (
                 f'<tr>'
-                f'<td style="padding:5px 10px;color:#aaa">{sid}</td>'
+                f'<td style="padding:5px 10px;color:#fff">{sid}</td>'
                 f'<td style="padding:5px 10px;color:#00e5ff">{s["symbol"]}</td>'
                 f'<td style="padding:5px 10px;color:{pnl_color}">{pnl_str}</td>'
                 f'<td style="padding:5px 10px">{tag_html}</td>'
                 f'</tr>'
+            )
+
+        # Portfolio summary row
+        pf = result.get("portfolio", {})
+        portfolio_html = ""
+        if pf and pf.get("total_assets"):
+            pnl_color = "#00e676" if pf.get("pnl_usdt", 0) >= 0 else "#ff1744"
+            pnl_sign  = "+" if pf.get("pnl_usdt", 0) >= 0 else ""
+            pnl_str   = f"{pnl_sign}${pf['pnl_usdt']:.2f} ({pnl_sign}{pf.get('pnl_pct', 0):.2f}%)"
+            portfolio_html = (
+                f'<div style="background:#0d1a0d;border:1px solid #1a2e1a;border-radius:6px;'
+                f'padding:10px 14px;margin-bottom:14px;font-size:13px">'
+                f'<span style="color:#fff;text-transform:uppercase;font-size:11px;letter-spacing:.08em">Portfolio</span>'
+                f'&nbsp;&nbsp;'
+                f'<span style="color:#fff">Total:</span> <strong style="color:#00e676">${pf["total_assets"]:.2f}</strong>'
+                f'&nbsp;&nbsp;'
+                f'<span style="color:#fff">USDT:</span> <span style="color:#fff">${pf.get("usdt_free", 0):.2f}</span>'
+                f'&nbsp;&nbsp;'
+                f'<span style="color:#fff">Spot:</span> <span style="color:#00e5ff">${pf.get("coin_value", 0):.2f}</span>'
+                f'&nbsp;&nbsp;'
+                f'<span style="color:#fff">Earn:</span> <span style="color:#ffd600">${pf.get("earn_value", 0):.2f}</span>'
+                f'&nbsp;&nbsp;'
+                f'<span style="color:#fff">Day P&amp;L:</span> <strong style="color:{pnl_color}">{pnl_str}</strong>'
+                f'&nbsp;&nbsp;'
+                f'<span style="color:#444">Start: ${pf.get("day_start", 0):.2f}</span>'
+                f'</div>'
             )
 
         # Issue rows
@@ -300,27 +348,28 @@ def send_monitor_email(result: dict) -> bool:
                 issue_items += (
                     f'<li style="margin:6px 0">'
                     f'<span style="color:{c};font-weight:bold">[{iss["severity"]}]</span> '
-                    f'<span style="color:#ddd">{iss["name"]}: {iss["msg"]}</span>'
+                    f'<span style="color:#fff">{iss["name"]}: {iss["msg"]}</span>'
                     f'</li>'
                 )
             issue_html = (
-                f'<p style="color:#888;margin:16px 0 6px">Issues detected:</p>'
+                f'<p style="color:#fff;margin:16px 0 6px">Issues detected:</p>'
                 f'<ul style="margin:0;padding-left:18px">{issue_items}</ul>'
             )
 
         html = _em._style_wrap(f"""
           <h2 style="color:{status_color};margin:0 0 4px">&#x1F916; Agent Health Check</h2>
-          <p style="color:#555;font-size:12px;margin:0 0 16px">{result['ts']}</p>
+          <p style="color:#fff;font-size:12px;margin:0 0 16px">{result['ts']}</p>
           <p style="margin:0 0 14px">
             Status:&nbsp;<strong style="color:{status_color}">{status_text}</strong>
           </p>
+          {portfolio_html}
           <table style="width:100%;border-collapse:collapse;margin-bottom:14px">
             <thead>
               <tr style="border-bottom:1px solid #1e1e1e">
-                <th style="padding:5px 10px;text-align:left;color:#888">Slot</th>
-                <th style="padding:5px 10px;text-align:left;color:#888">Symbol</th>
-                <th style="padding:5px 10px;text-align:left;color:#888">P&amp;L</th>
-                <th style="padding:5px 10px;text-align:left;color:#888">State</th>
+                <th style="padding:5px 10px;text-align:left;color:#fff">Slot</th>
+                <th style="padding:5px 10px;text-align:left;color:#fff">Symbol</th>
+                <th style="padding:5px 10px;text-align:left;color:#fff">P&amp;L</th>
+                <th style="padding:5px 10px;text-align:left;color:#fff">State</th>
               </tr>
             </thead>
             <tbody>{slot_rows}</tbody>

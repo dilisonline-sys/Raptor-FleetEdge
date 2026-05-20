@@ -128,8 +128,10 @@ Each agent dashboard includes:
 - **USDT balance + coin asset value** — live from Binance
 - **Signal / regime / RSI / MACD** — current indicator readings
 - **Open positions** with entry, stop, TP1/TP2 lines on chart
+- **Portfolio card** — full account value: USDT + active spot positions + Simple Earn holdings
 - **AI Analyst panel** — enable/disable per dashboard (requires `ANTHROPIC_API_KEY`)
 - **Order log** — recent fills and open orders
+- **Day / Night theme toggle** — persistent preference saved in `localStorage`
 
 ---
 
@@ -428,15 +430,46 @@ Before switching to `TRADING_MODE=live`:
 | `market_data.py` | Feeds, order book, indicators (RSI, EMA, MACD, ATR, BB, VWAP) |
 | `market_scanner.py` | Ranks coins by volatility/momentum score |
 | `sizing.py` | Position sizing with volatility and sentiment adjustment |
-| `order_manager.py` | Order submission, retries, fill tracking |
+| `order_manager.py` | Order submission, retries, fill tracking, Simple Earn value fetcher |
 | `exit_manager.py` | Hard stops, break-even, trailing stops, TP1/2/3 ladder |
 | `risk_engine.py` | Drawdown tracking, kill switch, alerts |
 | `regime.py` | TRENDING / RANGING / VOLATILE classification |
-| `equity_pool.py` | Shared pool — prevents sibling agents picking the same coin |
+| `equity_pool.py` | Shared pool — coordinates budgets, coin exclusions, earn value across agents |
+| `portfolio_tracker.py` | Full account P&L — USDT + spot positions + Simple Earn (Flexible) holdings |
+| `agent_monitor.py` | 30-minute health check — email report with fleet status and portfolio summary |
 | `ai_analyst.py` | Claude Haiku advisory analyst |
 | `email_notifier.py` | Email alerts — fills, rotations, 4h P&L reports |
 | `instruction_server.py` | Per-agent HTTP dashboard and instruction endpoint |
 | `config.py` | All parameters in one place |
+
+---
+
+## Portfolio Tracking
+
+The `portfolio_tracker` module maintains a real-time view of the complete account value:
+
+```
+total_assets = usdt_free + spot_positions + simple_earn_holdings
+```
+
+- **USDT free** — spendable balance, updated every 30 s by each agent's background pusher
+- **Spot positions** — sum of each slot's `open_usdt` (active coin valued at live price)
+- **Simple Earn** — all `LD`-prefixed Flexible Savings positions priced at market; fetched every 5 min by slot 0 and published to the shared pool
+
+This value is shown in the **PORTFOLIO card** on every agent dashboard and included in all monitor emails. Day P&L is calculated against the day-start baseline (`/tmp/dipu_portfolio_day.json`), which resets each UTC calendar day.
+
+---
+
+## Health Monitor
+
+`agent_monitor.py` runs an independent health check every 30 minutes and emails a fleet summary including:
+
+- Agent state (RUNNING / STOPPED / HALTED)
+- Per-slot open positions and P&L
+- Full portfolio breakdown (USDT + Spot + Earn)
+- Any risk alerts or anomalies
+
+Configure the monitor with the same email settings used for trade notifications.
 
 ---
 
