@@ -227,6 +227,7 @@ async def main_loop():
         # Fallback: fetch live equity on startup (used if no portfolio day file exists yet)
         _init_equity = await om.get_balances_raw(cfg.SYMBOL)
         risk.update_metrics(_init_equity[0])  # index 0 = non-base usdt equiv
+    equity = risk.day_start_equity or 0.0  # ensure equity var is defined for READY log below
 
     async def _price_pusher():
         """Push live WS ticker price to dashboard state every 1s for chart live-tick."""
