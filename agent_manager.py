@@ -929,6 +929,21 @@ class AgentManager:
                 print(f"[manager] log_cleaner error: {e}")
             await asyncio.sleep(INTERVAL)
 
+    async def _monitor_scheduler(self):
+        """Check agent health every 30 minutes, write report, send email."""
+        INTERVAL = 30 * 60
+        await asyncio.sleep(120)  # wait 2 min after startup before first check
+        while True:
+            try:
+                import agent_monitor as _mon
+                loop   = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, _mon.check_and_report)
+                status = "OK" if result["healthy"] else f"{len(result['issues'])} issue(s)"
+                print(f"[manager] monitor: {status}")
+            except Exception as e:
+                print(f"[manager] monitor error: {e}")
+            await asyncio.sleep(INTERVAL)
+
     async def start(self):
         runner = web.AppRunner(self._app)
         await runner.setup()
@@ -936,6 +951,7 @@ class AgentManager:
         await site.start()
         asyncio.create_task(self._pnl_report_scheduler())
         asyncio.create_task(self._log_cleaner_scheduler())
+        asyncio.create_task(self._monitor_scheduler())
         print(f"[manager] running on :{MANAGER_PORT}")
 
 
