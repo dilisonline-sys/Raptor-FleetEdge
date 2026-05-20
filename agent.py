@@ -60,6 +60,13 @@ def _load_positions(slot: int, symbol: str) -> list | None:
     try:
         if not os.path.exists(path):
             return None
+        # Discard if the file is older than 24 h — positions that old are stale
+        age_hours = (time.time() - os.path.getmtime(path)) / 3600
+        if age_hours > 24:
+            os.unlink(path)
+            log("AGENT", "POS_RESTORE_SKIP", reason="stale_file",
+                age_hours=round(age_hours, 1), slot=slot)
+            return None
         with open(path) as _f:
             data = json.load(_f)
         if data.get("symbol") != symbol:

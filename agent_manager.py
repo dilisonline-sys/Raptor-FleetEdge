@@ -78,6 +78,40 @@ def _save_state():
         pass
 
 
+def _startup_cleanup():
+    """
+    Clear stale runtime files on every manager startup so agents always pull
+    fresh data. Preserves user config and per-slot position files (agents
+    reconcile open positions against Binance on their own startup).
+
+    Cleared:
+      - equity pool  — stale slot registrations from the previous session
+      - portfolio day baseline — recalculated fresh on first agent spawn
+      - all *.log files in /tmp — truncated to zero for a clean session
+
+    Preserved:
+      - dipu_positions_<slot>.json — open position records for recovery
+      - dipu_email_config.json     — user email settings
+    """
+    _tmp = Path("/tmp")
+
+    # Reset equity pool
+    pool = Path(POOL_FILE)
+    pool.write_text(json.dumps({"slots": {}, "ts": 0, "usdt_free": 0, "earn_value": 0}))
+
+    # Remove portfolio day baseline — portfolio_tracker will recreate it
+    (_tmp / "dipu_portfolio_day.json").unlink(missing_ok=True)
+
+    # Truncate all dipu log files (preserves the file so tail -f keeps working)
+    for log_file in sorted(_tmp.glob("dipu_*.log")):
+        try:
+            log_file.write_text("")
+        except Exception:
+            pass
+
+    print("[manager] startup cleanup complete — stale cache cleared, positions preserved")
+
+
 def _load_state():
     if not STATE_FILE.exists():
         return
@@ -1006,6 +1040,7 @@ class AgentManager:
 
 
 async def main():
+    _startup_cleanup()
     _load_state()
     await _fetch_available_coins()
     manager = AgentManager()
