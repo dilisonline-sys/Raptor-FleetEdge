@@ -1017,7 +1017,8 @@ async def main_loop():
             _ep.deregister(_agent_slot)
             sys.exit(0)
         except Exception as e:
-            log("AGENT", "LOOP_ERROR", error=str(e))
+            import traceback as _tb
+            log("AGENT", "LOOP_ERROR", error=str(e), trace=_tb.format_exc()[-300:])
             await _cycle_sleep()
 
 

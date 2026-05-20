@@ -9,6 +9,22 @@ _log = logging.getLogger("dipu")
 _agent_name = os.environ.get("AGENT_NAME", "dipu")
 
 
+class _SafeEncoder(json.JSONEncoder):
+    """Handle numpy scalar types (bool_, int_, float_) that json can't serialize."""
+    def default(self, obj):
+        try:
+            import numpy as np
+            if isinstance(obj, np.bool_):
+                return bool(obj)
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+        except ImportError:
+            pass
+        return super().default(obj)
+
+
 def log(module: str, action: str, **kwargs) -> None:
     record = {
         "ts":     datetime.now(timezone.utc).isoformat(),
@@ -17,4 +33,4 @@ def log(module: str, action: str, **kwargs) -> None:
         "action": action,
         **kwargs,
     }
-    _log.info(json.dumps(record))
+    _log.info(json.dumps(record, cls=_SafeEncoder))
