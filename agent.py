@@ -209,22 +209,33 @@ async def main_loop():
     update_state(pool_slot=_agent_slot)
     await fg.connect()
 
-    # Fetch a live price for startup equity so day_start_equity includes any held base asset
-    try:
-        import aiohttp as _aio
-        async with _aio.ClientSession() as _s:
-            _init_sym = "BTCUSDT" if cfg.TRADING_MODE == "live" else (os.environ.get("AGENT_SYMBOL", "BTCUSDT") or "BTCUSDT")
-            async with _s.get("https://api.binance.com/api/v3/ticker/price",
-                               params={"symbol": _init_sym},
-                               timeout=_aio.ClientTimeout(total=5)) as _r:
-                _init_price = float((await _r.json()).get("price", 0))
-    except Exception:
-        _init_price = 0.0
-    equity = await om.get_equity(
-        symbol=os.environ.get("AGENT_SYMBOL", "") or cfg.SYMBOL,
-        price=_init_price if _init_price else None,
-    )
-    risk.update_metrics(equity)
+    # Initialise day_start_equity from the persistent portfolio_tracker baseline.
+    # This avoids false halts from transient equity spikes on the very first REST call.
+    # The portfolio_tracker file is written by reset_day_start() and survives restarts.
+    import portfolio_tracker as _pt_init
+    _pf_init = _pt_init.get_portfolio_state()
+    _day_start = _pf_init.get("day_start", 0.0)
+    if _day_start > 0:
+        risk.day_start_equity   = _day_start
+        risk.month_start_equity = _day_start
+        log("AGENT", "DAY_START_FROM_PORTFOLIO", day_start=round(_day_start, 2))
+    else:
+        # Fallback: fetch live equity and use it as the baseline (original behaviour)
+        try:
+            import aiohttp as _aio
+            async with _aio.ClientSession() as _s:
+                _init_sym = "BTCUSDT" if cfg.TRADING_MODE == "live" else (os.environ.get("AGENT_SYMBOL", "BTCUSDT") or "BTCUSDT")
+                async with _s.get("https://api.binance.com/api/v3/ticker/price",
+                                   params={"symbol": _init_sym},
+                                   timeout=_aio.ClientTimeout(total=5)) as _r:
+                    _init_price = float((await _r.json()).get("price", 0))
+        except Exception:
+            _init_price = 0.0
+        _init_equity = await om.get_equity(
+            symbol=os.environ.get("AGENT_SYMBOL", "") or cfg.SYMBOL,
+            price=_init_price if _init_price else None,
+        )
+        risk.update_metrics(_init_equity)
 
     async def _price_pusher():
         """Push live WS ticker price to dashboard state every 1s for chart live-tick."""
