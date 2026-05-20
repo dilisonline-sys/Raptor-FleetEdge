@@ -82,6 +82,28 @@ SYMBOL       = "BTCUSDT"
 INTERVAL     = "15m"
 CANDLE_LIMIT = 200
 
+# ── Shared equity pool ────────────────────────────────────
+# All agents draw from the same USDT balance on this Binance account.
+# SHARED_EQUITY_MODE must be True for live/demo — agents coordinate
+# through equity_pool.py to prevent over-deployment.
+#
+# FLEET_SIZE:    total number of agent slots sharing the pool (fixed at 4).
+#               Used by get_budget() to divide the pool evenly even when
+#               not all slots are currently active, avoiding one agent
+#               monopolising equity while siblings are starting up.
+#
+# MAX_EXPOSURE:  maximum fraction of total equity the entire fleet may
+#               have deployed at once (across all open positions combined).
+#
+# MAX_TRADE_PCT: maximum fraction of total equity a single agent may
+#               deploy in one position.
+#               Each agent's effective budget = min(
+#                   total_equity × MAX_TRADE_PCT / FLEET_SIZE,   ← per-slot share
+#                   total_equity × MAX_EXPOSURE  − other_open     ← pool headroom
+#               )
+SHARED_EQUITY_MODE = True
+FLEET_SIZE         = int(os.environ.get("DIPU_FLEET_SIZE", 4))
+
 # ── Per-mode risk parameters (testnet == demo; live can differ) ──
 _RISK = {
     #              risk_pct  max_trade  exposure  leverage  daily_dd  monthly_dd  consec_loss

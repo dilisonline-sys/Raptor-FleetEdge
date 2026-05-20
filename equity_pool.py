@@ -112,15 +112,24 @@ def get_other_symbols(slot: int) -> set[str]:
 def get_budget(slot: int, total_equity: float) -> float:
     """Max USDT this slot may deploy for a new position.
 
-    = min(
-        per-agent share  = total_equity × MAX_TRADE_PCT / n_active_agents,
-        pool remaining   = total_equity × MAX_EXPOSURE  - other_slots_open_usdt
-    )
-    Prevents any single agent from over-sizing when siblings already have positions open.
+    All agents share one USDT balance (SHARED_EQUITY_MODE). Budget is:
+
+        min(
+            per-slot share  = total_equity × MAX_TRADE_PCT / FLEET_SIZE,
+            pool headroom   = total_equity × MAX_EXPOSURE  − other_slots_open_usdt
+        )
+
+    FLEET_SIZE (default 4) is always used as the divisor — not just the
+    number of currently-active agents — so a single running agent cannot
+    monopolise the shared pool while siblings are starting up.
     """
+    if not cfg.SHARED_EQUITY_MODE:
+        # Standalone mode: agent owns all equity, no pool coordination
+        return total_equity * cfg.MAX_TRADE_PCT
+
     state  = _live(_read())
     slots  = state.get("slots", {})
-    n      = max(sum(1 for s in slots.values() if s is not None), 1)
+    n      = cfg.FLEET_SIZE  # divide by full fleet, not just live agents
 
     other_open    = sum(s["open_usdt"] for k, s in slots.items()
                         if s is not None and int(k) != slot)
