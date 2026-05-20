@@ -83,12 +83,12 @@ def _send(subject: str, body_html: str) -> bool:
 
 
 def _style_wrap(inner: str) -> str:
-    return f"""<div style="font-family:'Courier New',monospace;background:#0a0a0a;color:#ddd;
+    return f"""<div style="font-family:'Courier New',monospace;background:#0a0a0a;color:#fff;
 padding:24px;border-radius:10px;max-width:560px;margin:0 auto">{inner}</div>"""
 
 
 def _row(label: str, value: str, color: str = "#fff") -> str:
-    return (f'<tr><td style="padding:5px 14px 5px 0;color:#888">{label}</td>'
+    return (f'<tr><td style="padding:5px 14px 5px 0;color:#fff">{label}</td>'
             f'<td style="padding:5px 0;color:{color};font-weight:bold">{value}</td></tr>')
 
 
@@ -154,7 +154,7 @@ def send_pnl_report(slots_data: dict) -> bool:
     for slot_id in sorted(slots_data.keys()):
         s = slots_data[slot_id]
         if not s:
-            rows += (f'<tr><td style="padding:6px 12px;color:#555">Slot {slot_id}</td>'
+            rows += (f'<tr><td style="padding:6px 12px;color:#fff">Slot {slot_id}</td>'
                      f'<td colspan="3" style="padding:6px 12px;color:#333">empty</td></tr>')
             continue
         pnl = s.get("daily_pnl", 0)
@@ -171,20 +171,20 @@ def send_pnl_report(slots_data: dict) -> bool:
     total_str   = f"{'+'if total_pnl>=0 else ''}${total_pnl:.2f}"
     html = _style_wrap(f"""
       <h2 style="color:#00e5ff;margin:0 0 4px">&#x1F4CA; 4-Hour P&amp;L Report</h2>
-      <p style="color:#555;font-size:12px;margin:0 0 18px">{_ts()}</p>
+      <p style="color:#fff;font-size:12px;margin:0 0 18px">{_ts()}</p>
       <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
         <thead>
           <tr style="border-bottom:1px solid #1e1e1e">
-            <th style="padding:6px 12px;text-align:left;color:#888">Slot</th>
-            <th style="padding:6px 12px;text-align:left;color:#888">Coin</th>
-            <th style="padding:6px 12px;text-align:left;color:#888">Open ($)</th>
-            <th style="padding:6px 12px;text-align:left;color:#888">Daily P&amp;L</th>
+            <th style="padding:6px 12px;text-align:left;color:#fff">Slot</th>
+            <th style="padding:6px 12px;text-align:left;color:#fff">Coin</th>
+            <th style="padding:6px 12px;text-align:left;color:#fff">Open ($)</th>
+            <th style="padding:6px 12px;text-align:left;color:#fff">Daily P&amp;L</th>
           </tr>
         </thead>
         <tbody>{rows}</tbody>
       </table>
       <div style="border-top:1px solid #1e1e1e;padding-top:12px">
-        <span style="color:#888">Total Daily P&amp;L:&nbsp;</span>
+        <span style="color:#fff">Total Daily P&amp;L:&nbsp;</span>
         <span style="color:{total_color};font-size:1.15em;font-weight:bold">{total_str}</span>
       </div>""")
     return _send(f"[dipu] 4h P&L Report — Total: {total_str}", html)
@@ -193,8 +193,8 @@ def send_pnl_report(slots_data: dict) -> bool:
 def send_test_email(recipient: str) -> bool:
     html = _style_wrap(f"""
       <h2 style="color:#00e5ff;margin:0 0 14px">&#x2705; dipu email test</h2>
-      <p style="color:#aaa;margin:0 0 12px">Email notifications are working correctly.</p>
-      <p style="color:#555;font-size:12px">{_ts()}</p>""")
+      <p style="color:#fff;margin:0 0 12px">Email notifications are working correctly.</p>
+      <p style="color:#fff;font-size:12px">{_ts()}</p>""")
     cfg = load_config()
     original = cfg.get("recipient", "")
     cfg["recipient"] = recipient

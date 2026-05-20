@@ -26,6 +26,7 @@ class OrderManager:
     def __init__(self):
         self._session: aiohttp.ClientSession | None = None
         self._lot_steps: dict[str, float] = {}   # symbol → stepSize cache
+        self._price_cache: dict[str, float] = {}  # asset → last known USDT price
 
     async def _ensure_session(self):
         if not self._session or self._session.closed:
@@ -82,9 +83,12 @@ class OrderManager:
                     ) as rp:
                         coin_price = float((await rp.json()).get("price", 0))
                     if coin_price > 0:
+                        self._price_cache[asset] = coin_price
                         usdt += bal * coin_price
                 except Exception:
-                    pass
+                    cached = self._price_cache.get(asset, 0.0)
+                    if cached > 0:
+                        usdt += bal * cached
 
             log("MODULE_2", "EQUITY_FETCH", usdt=round(usdt, 2))
             return usdt
@@ -131,9 +135,12 @@ class OrderManager:
                     ) as rp:
                         coin_price = float((await rp.json()).get("price", 0))
                     if coin_price > 0:
+                        self._price_cache[asset] = coin_price
                         usdt += bal * coin_price
                 except Exception:
-                    pass
+                    cached = self._price_cache.get(asset, 0.0)
+                    if cached > 0:
+                        usdt += bal * cached
             return usdt, bals.get(base, 0.0), raw_usdt
 
     async def get_all_significant_balances(self, min_usdt_value: float = 5.0) -> list[dict]:
@@ -165,6 +172,53 @@ class OrderManager:
             except Exception:
                 pass
         return result
+
+    # Maps Binance Simple Earn LD-prefixed tokens to their underlying asset symbol
+    _LD_MAP: dict[str, str] = {
+        "LDETH": "ETH", "LDLINK": "LINK", "LDZEC": "ZEC", "LDONT": "ONT",
+        "LDALGO": "ALGO", "LDCHZ": "CHZ", "LDSTORJ": "STORJ", "LDENJ": "ENJ",
+        "LDNEAR": "NEAR", "LDSHIB": "SHIB", "LDSHIB2": "SHIB", "LDFIDA": "FIDA",
+        "LDSUI": "SUI", "LDTON": "TON", "LDTST": "TST", "LDLAYER": "LAYER",
+        "LDONDO": "ONDO", "LDHOME": "HOME", "LDSAHARA": "SAHARA", "LDOPEN": "OPEN",
+        "LDXAUT": "XAUT", "LDAIGENSYN": "AIGENSYN", "LDBTC": "BTC",
+        "LDBNB": "BNB", "LDETH2": "ETH", "LDSOL": "SOL", "LDUSDC": "USDC",
+    }
+
+    async def get_earn_value(self) -> float:
+        """Returns total USDT value of all Simple Earn (LD-prefixed) flexible holdings."""
+        await self._ensure_session()
+        params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
+        params["signature"] = _sign(params)
+        try:
+            async with self._session.get(cfg.SPOT_BASE_URL + "/api/v3/account", params=params) as r:
+                r.raise_for_status()
+                data = await r.json()
+            bals = {b["asset"]: float(b["free"]) + float(b["locked"])
+                    for b in data["balances"]
+                    if b["asset"].startswith("LD") and float(b["free"]) + float(b["locked"]) > 1e-8}
+        except Exception as e:
+            log("MODULE_2", "EARN_FETCH_ERROR", error=str(e))
+            return 0.0
+
+        total = 0.0
+        for ld_asset, qty in bals.items():
+            underlying = self._LD_MAP.get(ld_asset, ld_asset[2:])  # strip "LD" prefix as fallback
+            price = 0.0
+            try:
+                async with self._session.get(
+                    cfg.PUBLIC_DATA_URL + "/api/v3/ticker/price",
+                    params={"symbol": underlying + "USDT"}
+                ) as rp:
+                    rdata = await rp.json()
+                    if "price" in rdata:
+                        price = float(rdata["price"])
+                        self._price_cache[underlying] = price
+            except Exception:
+                price = self._price_cache.get(underlying, 0.0)
+            if price > 0:
+                total += qty * price
+        log("MODULE_2", "EARN_VALUE", usdt=round(total, 2))
+        return total
 
     async def _post_order(self, params: dict, retries: int = 3) -> dict | None:
         await self._ensure_session()

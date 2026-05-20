@@ -23,7 +23,7 @@ def _read() -> dict:
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
     except Exception:
-        return {"slots": {str(i): None for i in range(4)}, "ts": 0}
+        return {"slots": {str(i): None for i in range(4)}, "ts": 0, "usdt_free": 0.0}
 
 
 def _write(state: dict):
@@ -57,13 +57,34 @@ def register(slot: int, symbol: str, pid: int, port: int):
     _write(state)
 
 
-def report(slot: int, symbol: str, open_usdt: float, daily_pnl: float):
-    """Update this slot's live state. Called each cycle by the agent."""
+def report(slot: int, symbol: str, open_usdt: float, daily_pnl: float, *,
+           usdt_free: float | None = None):
+    """Update this slot's live state. Called each cycle by the agent.
+
+    daily_pnl is stored as both 'daily_pnl' (backward compat) and 'slot_pnl'
+    (slot's own unrealized P&L on its open coin position only).
+    """
     state = _live(_read())
     s = state["slots"].get(str(slot)) or {}
     s.update({"symbol": symbol, "open_usdt": open_usdt,
-               "daily_pnl": daily_pnl, "ts": time.time()})
+               "daily_pnl": daily_pnl, "slot_pnl": daily_pnl, "ts": time.time()})
     state["slots"][str(slot)] = s
+    if usdt_free is not None:
+        state["usdt_free"] = usdt_free
+    _write(state)
+
+
+def report_usdt(raw_usdt: float):
+    """Update only the top-level usdt_free field in the pool (called by background equity pusher)."""
+    state = _live(_read())
+    state["usdt_free"] = raw_usdt
+    _write(state)
+
+
+def report_earn(earn_value: float):
+    """Update Simple Earn total in the pool (called by slot 0's equity pusher every 5 min)."""
+    state = _live(_read())
+    state["earn_value"] = earn_value
     _write(state)
 
 

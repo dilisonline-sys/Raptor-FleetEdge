@@ -46,6 +46,7 @@ _state = {
     "coin_asset":       "—",
     "ai_analyst_enabled": False,
     "ai_analysis":      {},
+    "portfolio":        {},
 }
 
 # ── HTML template ──────────────────────────────────────────────────────────────
@@ -59,7 +60,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0a0a0a;color:#ddd;font-family:'Courier New',monospace;padding:20px}
+body{background:#0a0a0a;color:#fff;font-family:'Courier New',monospace;padding:20px}
 h1{color:#00e5ff;font-size:1.5rem;margin-bottom:3px}
 h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;margin:22px 0 8px}
 .sub{color:#fff;font-size:.78rem;margin-bottom:20px}
@@ -113,16 +114,49 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .cbtn.active{background:#00e5ff;border-color:#00e5ff;color:#000;font-weight:bold}
 .cbtn.auto{background:#161616;border-color:#333;color:#00e5ff}
 .cbtn.auto.active{background:#00e5ff;color:#000}
+/* ── Theme toggle button ── */
+#theme-btn{position:fixed;top:12px;right:16px;z-index:9999;background:#1e1e2e;border:1px solid #444;color:#e0e0ff;border-radius:20px;padding:5px 14px;cursor:pointer;font-family:'Courier New',monospace;font-size:.72rem;font-weight:bold;letter-spacing:.04em;box-shadow:0 2px 8px rgba(0,0,0,.5);transition:.2s}
+#theme-btn:hover{background:#2a2a3e;border-color:#00e5ff;color:#00e5ff}
+/* ── Day theme overrides ── */
+[data-theme="day"]{background:#f4f5f7;color:#1a1a2e}
+[data-theme="day"] h1,[data-theme="day"] h2{color:#0a0a1e}
+[data-theme="day"] .sub{color:#1a1a2e}
+[data-theme="day"] #theme-btn{background:#e8e8f0;border-color:#aaa;color:#333;box-shadow:0 2px 8px rgba(0,0,0,.15)}
+[data-theme="day"] #theme-btn:hover{background:#d8d8ee;border-color:#0077bb;color:#0077bb}
+[data-theme="day"] .card{background:#fff;border-color:#dde0e6}
+[data-theme="day"] .card .lbl{color:#444}
+[data-theme="day"] .card .val{color:#0077bb}
+[data-theme="day"] #pool-bar{background:#eef0f3;border-color:#d4d8de;color:#1a1a2e}
+[data-theme="day"] .chart-wrap{background:#f0f2f5;border-color:#d4d8de}
+[data-theme="day"] .chart-header{background:#fff;border-color:#e0e3e8}
+[data-theme="day"] .chart-sym{color:#0077bb}
+[data-theme="day"] .legend{background:#f0f2f5}
+[data-theme="day"] table thead th{background:#eef0f3;color:#333;border-color:#d4d8de}
+[data-theme="day"] tbody tr{border-color:#eee}
+[data-theme="day"] tbody tr:hover{background:#eef0f3}
+[data-theme="day"] .log-wrap{background:#eef0f3;border-color:#d4d8de}
+[data-theme="day"] .log-toolbar{background:#e4e6ea;border-color:#d4d8de}
+[data-theme="day"] .log-toolbar input{background:#fff;border-color:#ccc;color:#111}
+[data-theme="day"] .log-toolbar button{background:#dde0e6;border-color:#ccc;color:#222}
+[data-theme="day"] .log-body{background:#f8f9fb}
+[data-theme="day"] .log-line{border-color:#e4e6ea}
+[data-theme="day"] .log-line.info{color:#1a1a2e}
+[data-theme="day"] .cbtn{background:#eef0f3;border-color:#ccc;color:#222}
+[data-theme="day"] .cbtn:hover{border-color:#333;color:#111}
+[data-theme="day"] .cbtn.active{background:#0077bb;border-color:#0077bb;color:#fff}
+[data-theme="day"] .cbtn.auto{background:#e4e6ea;border-color:#bbb;color:#0077bb}
+[data-theme="day"] .cbtn.auto.active{background:#0077bb;color:#fff}
 </style>
 </head>
 <body>
+<button id="theme-btn" onclick="toggleTheme()">☀ Day</button>
 <h1>&#9654; __AGENT_NAME__ <span class="badge __MODE_CLASS__">__MODE__</span><span id="sse-status" style="color:#fff">○ connecting…</span></h1>
 <div id="pool-bar" style="display:flex;align-items:center;gap:16px;padding:6px 12px;background:#0e0e0e;border:1px solid #1a1a1a;border-radius:6px;margin-bottom:12px;font-size:.7rem;flex-wrap:wrap">
-  <span style="color:#555;text-transform:uppercase;letter-spacing:.08em">Pool</span>
+  <span style="color:#fff;text-transform:uppercase;letter-spacing:.08em">Pool</span>
   <span>Slot <span id="pb-slot" style="color:#00e5ff;font-weight:bold">—</span></span>
   <span>Budget <span id="pb-budget" style="color:#ffd600;font-weight:bold">—</span></span>
-  <span>Other agents: <span id="pb-others" style="color:#aaa">—</span></span>
-  <span style="margin-left:auto;color:#555;font-size:.65rem" id="pb-ts">—</span>
+  <span>Other agents: <span id="pb-others" style="color:#fff">—</span></span>
+  <span style="margin-left:auto;color:#fff;font-size:.65rem" id="pb-ts">—</span>
 </div>
 <div class="sub">
   <span style="color:#00e5ff;font-family:monospace">&#128279; __API_URL__</span>
@@ -139,9 +173,9 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 </div>
 
 <div class="grid" id="cards">
-  <div class="card"><div class="lbl">USDT Balance</div><div class="val" id="c-usdt-bal">—</div><div style="font-size:.7rem;color:#aaa;margin-top:3px">Total: <span id="c-eq">—</span></div></div>
+  <div class="card"><div class="lbl">USDT Balance</div><div class="val" id="c-usdt-bal">—</div><div style="font-size:.7rem;color:#fff;margin-top:3px">Total: <span id="c-eq">—</span></div></div>
   <div class="card"><div class="lbl">Active Coin</div><div class="val g" id="c-sym">—</div></div>
-  <div class="card"><div class="lbl">Asset Balance</div><div class="val y" id="c-coin-qty">—</div><div style="font-size:.7rem;color:#aaa;margin-top:3px" id="c-coin-val">—</div></div>
+  <div class="card"><div class="lbl">Asset Balance</div><div class="val y" id="c-coin-qty">—</div><div style="font-size:.7rem;color:#fff;margin-top:3px" id="c-coin-val">—</div></div>
   <div class="card"><div class="lbl">Mode</div><div class="val" id="c-mode">—</div></div>
   <div class="card"><div class="lbl">Regime</div><div class="val y" id="c-reg">—</div></div>
   <div class="card"><div class="lbl">Open Positions</div><div class="val" id="c-pos">—</div></div>
@@ -153,6 +187,19 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
   <div class="card"><div class="lbl">Risk / Max Trade</div><div class="val" id="c-risk">—</div></div>
   <div class="card"><div class="lbl">Cycle</div><div class="val" id="c-cycle">—</div></div>
   <div class="card"><div class="lbl">Strategy</div><div class="val g" id="c-strat">—</div></div>
+  <div class="card" id="port-card">
+    <div class="lbl">PORTFOLIO</div>
+    <div style="font-size:.85rem;margin-top:4px">
+      <span style="color:#fff">Total:</span>&nbsp;<span id="port-total" style="color:#00e676;font-weight:bold">—</span>
+      &nbsp;&nbsp;<span style="color:#fff">USDT:</span>&nbsp;<span id="port-usdt" style="color:#fff">—</span>
+      &nbsp;&nbsp;<span style="color:#fff">Spot:</span>&nbsp;<span id="port-coins" style="color:#00e5ff">—</span>
+      &nbsp;&nbsp;<span style="color:#fff">Earn:</span>&nbsp;<span id="port-earn" style="color:#ffd600">—</span>
+    </div>
+    <div style="font-size:.82rem;margin-top:3px">
+      <span style="color:#fff">Day P&L:</span>&nbsp;<span id="port-pnl" style="font-weight:bold">—</span>
+      &nbsp;&nbsp;<span style="color:#fff">Start:</span>&nbsp;<span id="port-start" style="color:#fff">—</span>
+    </div>
+  </div>
 </div>
 
 <!-- Coin selector -->
@@ -178,60 +225,60 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 </div>
 
 <h2 style="display:flex;align-items:center;justify-content:space-between">
-  <span>&#9632; AI Analyst <span style="font-size:.6rem;color:#555;font-weight:normal;margin-left:6px">advisory only · does not affect trades</span></span>
-  <button id="ai-toggle-btn" onclick="toggleAnalyst()" style="font-size:.68rem;padding:4px 12px;border-radius:4px;border:1px solid #333;background:#111;color:#aaa;cursor:pointer">Enable</button>
+  <span>&#9632; AI Analyst <span style="font-size:.6rem;color:#fff;font-weight:normal;margin-left:6px">advisory only · does not affect trades</span></span>
+  <button id="ai-toggle-btn" onclick="toggleAnalyst()" style="font-size:.68rem;padding:4px 12px;border-radius:4px;border:1px solid #333;background:#111;color:#fff;cursor:pointer">Enable</button>
 </h2>
 <div id="ai-panel" style="display:none;background:#0a0d0a;border:1px solid #1a2e1a;border-radius:8px;padding:14px;margin-bottom:20px;font-size:.73rem">
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:10px">
     <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
-      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Sentiment</div>
+      <div style="color:#fff;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Sentiment</div>
       <div id="ai-sentiment" style="font-size:1.1rem;font-weight:bold;color:#00e676">—</div>
     </div>
     <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
-      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Confidence</div>
+      <div style="color:#fff;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Confidence</div>
       <div id="ai-confidence" style="font-size:1.1rem;font-weight:bold;color:#00e5ff">—</div>
     </div>
     <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
-      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Trend</div>
+      <div style="color:#fff;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Trend</div>
       <div id="ai-trend" style="font-size:1.1rem;font-weight:bold;color:#ffd600">—</div>
     </div>
     <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
-      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Momentum</div>
+      <div style="color:#fff;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Momentum</div>
       <div id="ai-momentum" style="font-size:1.1rem;font-weight:bold;color:#fff">—</div>
     </div>
     <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
-      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Entry Quality</div>
+      <div style="color:#fff;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Entry Quality</div>
       <div id="ai-entry" style="font-size:1.1rem;font-weight:bold;color:#fff">—</div>
     </div>
     <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
-      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Risk Level</div>
+      <div style="color:#fff;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Risk Level</div>
       <div id="ai-risk" style="font-size:1.1rem;font-weight:bold;color:#fff">—</div>
     </div>
     <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
-      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Support</div>
+      <div style="color:#fff;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Support</div>
       <div id="ai-support" style="font-size:.95rem;font-weight:bold;color:#00e676">—</div>
     </div>
     <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
-      <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Resistance</div>
+      <div style="color:#fff;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Resistance</div>
       <div id="ai-resistance" style="font-size:.95rem;font-weight:bold;color:#ff1744">—</div>
     </div>
   </div>
   <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px;margin-bottom:6px">
-    <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px">Market Insight</div>
-    <div id="ai-insight" style="color:#ddd;line-height:1.5">—</div>
+    <div style="color:#fff;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px">Market Insight</div>
+    <div id="ai-insight" style="color:#fff;line-height:1.5">—</div>
   </div>
   <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:6px;padding:10px">
-    <div style="color:#777;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px">Watch Next Candle</div>
+    <div style="color:#fff;font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px">Watch Next Candle</div>
     <div id="ai-watch" style="color:#ffd600;line-height:1.5">—</div>
   </div>
-  <div style="margin-top:6px;color:#555;font-size:.62rem;text-align:right" id="ai-ts">—</div>
+  <div style="margin-top:6px;color:#fff;font-size:.62rem;text-align:right" id="ai-ts">—</div>
 </div>
 
-<h2>&#9646; Market Scanner <span id="scanner-ts" style="font-size:.6rem;color:#555;margin-left:8px">scanning…</span></h2>
+<h2>&#9646; Market Scanner <span id="scanner-ts" style="font-size:.6rem;color:#fff;margin-left:8px">scanning…</span></h2>
 <div style="background:#0d0d0d;border:1px solid #1e1e1e;border-radius:8px;padding:12px;margin-bottom:20px;overflow-x:auto">
   <table style="width:100%;border-collapse:collapse;font-size:.7rem">
     <thead>
-      <tr style="color:#555;text-transform:uppercase;letter-spacing:.06em;font-size:.62rem">
+      <tr style="color:#fff;text-transform:uppercase;letter-spacing:.06em;font-size:.62rem">
         <th style="text-align:left;padding:4px 8px">#</th>
         <th style="text-align:left;padding:4px 8px">Symbol</th>
         <th style="text-align:right;padding:4px 8px">Score</th>
@@ -244,12 +291,12 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
       </tr>
     </thead>
     <tbody id="scanner-tbody">
-      <tr><td colspan="9" style="color:#555;padding:10px 8px">Scanning market…</td></tr>
+      <tr><td colspan="9" style="color:#fff;padding:10px 8px">Scanning market…</td></tr>
     </tbody>
   </table>
 </div>
 
-<h2>&#9646; Binance Orders <span id="orders-refresh" style="font-size:.6rem;color:#555;cursor:pointer;margin-left:8px" onclick="loadOrders()">&#8635; refresh</span></h2>
+<h2>&#9646; Binance Orders <span id="orders-refresh" style="font-size:.6rem;color:#fff;cursor:pointer;margin-left:8px" onclick="loadOrders()">&#8635; refresh</span></h2>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
   <div>
     <div style="font-size:.65rem;color:#fff;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Open Orders</div>
@@ -521,6 +568,19 @@ function renderCards(s) {
     _topCoins = s.top_coins || [];
     renderCoinSelector(_topCoins, _coinMode);   // preserve user's current selection
   }
+  // Portfolio card
+  if (s.portfolio && s.portfolio.total_assets) {
+    const pt = s.portfolio;
+    setEl('port-total', '$' + pt.total_assets.toFixed(2));
+    setEl('port-usdt',  '$' + pt.usdt_free.toFixed(2));
+    setEl('port-coins', '$' + (pt.coin_value || 0).toFixed(2));
+    setEl('port-earn',  '$' + (pt.earn_value || 0).toFixed(2));
+    const pnlColor = pt.pnl_usdt >= 0 ? '#00e676' : '#ff1744';
+    const pnlSign  = pt.pnl_usdt >= 0 ? '+' : '';
+    const portPnlEl = document.getElementById('port-pnl');
+    if (portPnlEl) portPnlEl.innerHTML = `<span style="color:${pnlColor}">${pnlSign}$${pt.pnl_usdt.toFixed(2)} (${pnlSign}${pt.pnl_pct.toFixed(2)}%)</span>`;
+    setEl('port-start', '$' + pt.day_start.toFixed(2));
+  }
   // Fear & Greed
   const fg = s.fear_greed || {value: 50, label: 'Neutral'};
   const fgEl = document.getElementById('c-fg');
@@ -715,7 +775,7 @@ function renderScanner(s) {
   document.getElementById('scanner-ts').textContent = 'last scan: ' + ts;
   const tbody = document.getElementById('scanner-tbody');
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="color:#555;padding:10px 8px">No scan data yet — runs every 60s</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="color:#fff;padding:10px 8px">No scan data yet — runs every 60s</td></tr>';
     return;
   }
   tbody.innerHTML = rows.map((r,i) => {
@@ -728,12 +788,12 @@ function renderScanner(s) {
     const chgClr   = r.chg_pct >= 0 ? '#00e676' : '#ff1744';
     const regClr   = r.regime === 'TRENDING' ? '#00e676' : r.regime === 'VOLATILE' ? '#ff6d00' : '#888';
     return `<tr style="border-bottom:1px solid #141414;background:${bg}">
-      <td style="padding:5px 8px;color:#555">${i+1}</td>
+      <td style="padding:5px 8px;color:#fff">${i+1}</td>
       <td style="padding:5px 8px;font-weight:bold;color:#fff">${r.symbol.replace('USDT','')}${badge}</td>
       <td style="padding:5px 8px;text-align:right;color:#ffd600">${r.score.toFixed(2)}</td>
       <td style="padding:5px 8px;text-align:right;color:#82b1ff">${r.atr_pct ? r.atr_pct.toFixed(3)+'%' : '—'}</td>
       <td style="padding:5px 8px;text-align:right;color:${chgClr}">${r.chg_pct >= 0 ? '+' : ''}${r.chg_pct}%</td>
-      <td style="padding:5px 8px;text-align:right;color:#aaa">$${r.vol_m}M</td>
+      <td style="padding:5px 8px;text-align:right;color:#fff">$${r.vol_m}M</td>
       <td style="padding:5px 8px;text-align:center;color:${trendClr}">${r.trend || '—'}</td>
       <td style="padding:5px 8px;text-align:center;color:${regClr};font-weight:bold;font-size:.68rem">${r.regime || '—'}</td>
       <td style="padding:5px 8px;text-align:center">
@@ -754,16 +814,16 @@ async function loadAILog() {
     document.getElementById('ai-total-cost').textContent = '$' + d.total_cost_usd.toFixed(4);
     const wrap = document.getElementById('ai-log-wrap');
     if (!d.records || d.records.length === 0) {
-      wrap.innerHTML = '<span style="color:#555">No AI calls logged yet.</span>';
+      wrap.innerHTML = '<span style="color:#fff">No AI calls logged yet.</span>';
       return;
     }
     const rows = [...d.records].reverse().map(r => {
       const dt = new Date(r.ts * 1000).toISOString().replace('T',' ').slice(0,19);
       const cost = '$' + (r.cost_usd || 0).toFixed(6);
       return `<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px solid #1a1a1a">
-        <span style="color:#555;min-width:135px">${dt}</span>
+        <span style="color:#fff;min-width:135px">${dt}</span>
         <span style="color:#ffd600;min-width:90px">${r.purpose || '—'}</span>
-        <span style="color:#aaa;min-width:160px">${r.model || '—'}</span>
+        <span style="color:#fff;min-width:160px">${r.model || '—'}</span>
         <span style="color:#82b1ff;min-width:70px">in:${(r.input_tokens||0).toLocaleString()}</span>
         <span style="color:#82b1ff;min-width:70px">out:${(r.output_tokens||0).toLocaleString()}</span>
         <span style="color:#00e676">${cost}</span>
@@ -791,18 +851,18 @@ async function loadOrders() {
         ? d.open.map(o => `<div style="border-bottom:1px solid #1a1a1a;padding:4px 0">
             <span style="color:${o.side==='BUY'?'#00e676':'#ff1744'};font-weight:bold">${o.side}</span>
             &nbsp;${o.qty} @ <span style="color:#00e5ff">${parseFloat(o.price)>0?'$'+parseFloat(o.price).toLocaleString():'MARKET'}</span>
-            &nbsp;<span style="color:#555">${o.status}</span>
+            &nbsp;<span style="color:#fff">${o.status}</span>
             &nbsp;<span style="color:#444;font-size:.62rem">#${o.id}</span>
           </div>`).join('')
-        : '<span style="color:#555">No open orders</span>';
+        : '<span style="color:#fff">No open orders</span>';
       histWrap.innerHTML = d.history.length
         ? d.history.map(o => `<div style="border-bottom:1px solid #1a1a1a;padding:4px 0">
             <span style="color:#444;font-size:.62rem">${o.ts}</span>
             &nbsp;<span style="color:${o.side==='BUY'?'#00e676':'#ff1744'};font-weight:bold">${o.side}</span>
             &nbsp;${o.qty} @ <span style="color:#00e5ff">$${parseFloat(o.price).toLocaleString()}</span>
-            &nbsp;<span style="color:#555;font-size:.62rem">${o.status}</span>
+            &nbsp;<span style="color:#fff;font-size:.62rem">${o.status}</span>
           </div>`).join('')
-        : '<span style="color:#555">No fills yet</span>';
+        : '<span style="color:#fff">No fills yet</span>';
     }
   } catch(e) { console.error('orders fetch:', e); }
   document.getElementById('orders-refresh').textContent = '⟳ refresh';
@@ -865,6 +925,33 @@ function renderAnalyst(s) {
   el('ai-ts').textContent = a.ts ? 'updated ' + new Date(a.ts*1000).toISOString().slice(11,19) + ' UTC' : '';
 }
 
+// ── Theme toggle ──────────────────────────────────────────
+const _CHART_DARK = { bg:'#0d0d0d', text:'#fff', grid:'#141414', border:'#1e1e1e' };
+const _CHART_DAY  = { bg:'#f4f5f7', text:'#333', grid:'#dde0e6', border:'#d4d8de' };
+function _applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const btn = document.getElementById('theme-btn');
+  if (btn) btn.textContent = theme === 'day' ? '☾ Night' : '☀ Day';
+  const c = theme === 'day' ? _CHART_DAY : _CHART_DARK;
+  if (typeof chart !== 'undefined' && chart) {
+    chart.applyOptions({
+      layout: { background: { color: c.bg }, textColor: c.text },
+      grid: { vertLines: { color: c.grid }, horzLines: { color: c.grid } },
+      rightPriceScale: { borderColor: c.border },
+      timeScale: { borderColor: c.border },
+    });
+  }
+}
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'night';
+  const next = cur === 'day' ? 'night' : 'day';
+  localStorage.setItem('dipu-theme', next);
+  _applyTheme(next);
+}
+(function() {
+  const saved = localStorage.getItem('dipu-theme') || 'night';
+  _applyTheme(saved);
+})();
 // ── Boot ──────────────────────────────────────────────────
 initChart();
 renderCoinSelector([], 'auto');
@@ -1046,7 +1133,15 @@ class InstructionServer:
         mode, mode_cls, api_url = _mode_map.get(cfg.TRADING_MODE, ("TESTNET","testnet","testnet.binance.vision"))
         if _state["halt"]:
             mode, mode_cls = "HALTED", "halt"
-        html = (DASHBOARD_HTML
+        # Re-parse DASHBOARD_HTML from disk on each request so CSS/HTML changes
+        # take effect on browser refresh without an agent restart.
+        try:
+            import re as _re
+            src = open(__file__).read()
+            live_html = _re.search(r'DASHBOARD_HTML = r"""(.*?)^"""', src, _re.S | _re.M).group(1)
+        except Exception:
+            live_html = DASHBOARD_HTML
+        html = (live_html
                 .replace("__MODE__",       mode)
                 .replace("__MODE_CLASS__", mode_cls)
                 .replace("__API_URL__",    api_url)

@@ -236,12 +236,19 @@ async def main_loop():
                 pass
             await asyncio.sleep(1)
 
+    # Shared cache so the main cycle can read equity without an extra REST call
+    _raw_usdt_cache = [0.0]
+    _base_cache     = [0.0]
+
     async def _equity_pusher():
         """Recompute displayed equity every 1s using live WS price + cached Binance balances.
-        Balances are re-fetched from the API every 30s; valuation uses the WS tick price."""
-        _usdt      = 0.0
-        _base      = 0.0
-        _last_fetch = 0.0
+        Balances are re-fetched from the API every 30s; valuation uses the WS tick price.
+        Slot 0 also fetches Simple Earn (LD) value every 5 min and publishes to the pool."""
+        _usdt           = 0.0
+        _base           = 0.0
+        _raw_usdt       = 0.0
+        _last_fetch     = 0.0
+        _last_earn_fetch = 0.0
         import time as _time
         while True:
             try:
@@ -251,6 +258,19 @@ async def main_loop():
                 if now - _last_fetch >= 30:
                     _usdt, _base, _raw_usdt = await om.get_balances_raw(active_symbol)
                     _last_fetch  = now
+                    # Publish raw USDT to the equity pool so portfolio_tracker can aggregate
+                    _ep.report_usdt(_raw_usdt)
+                    # Update shared cache for main cycle's equity computation
+                    _raw_usdt_cache[0] = _raw_usdt
+                    _base_cache[0]     = _base
+                # Slot 0 fetches Simple Earn (LD) holdings every 5 min and writes to pool
+                if _agent_slot == 0 and now - _last_earn_fetch >= 300:
+                    try:
+                        earn_val = await om.get_earn_value()
+                        _ep.report_earn(earn_val)
+                        _last_earn_fetch = now
+                    except Exception:
+                        pass
                 # _usdt = USDT + all other coins priced at REST; add active base at live WS price
                 if price > 0:
                     _coin_asset = active_symbol[:-4] if active_symbol.endswith("USDT") else active_symbol
@@ -958,13 +978,18 @@ async def main_loop():
                             })
 
             # ── Module 6: Risk Metrics ─────────────────────────────
-            equity = await om.get_equity(symbol=active_symbol, price=current_price)
+            # Use background-task cached values — avoids a duplicate REST call per cycle.
+            # _state["equity"] is kept current by _equity_pusher every second.
+            equity = _state.get("equity") or (_raw_usdt_cache[0] + _base_cache[0] * current_price)
             risk.update_metrics(equity)
+            import portfolio_tracker as _pt
+            _pf = _pt.get_portfolio_state()
             update_state(
                 equity=equity,
                 daily_dd=((risk.day_start_equity - equity) / risk.day_start_equity * 100)
                           if risk.day_start_equity else 0,
                 halt=risk.halt_flag,
+                portfolio=_pf,
             )
 
             # ── Position heartbeat (displayed every cycle in live log) ────
@@ -995,7 +1020,8 @@ async def main_loop():
 
             # Cache pool values for next cycle's heartbeat at top of loop
             _pool_open_usdt = sum(p.qty * current_price for p in em.positions)
-            _pool_pnl       = equity - (risk.day_start_equity or equity)
+            # slot_pnl = unrealized P&L on THIS slot's open coin position only
+            _pool_pnl = sum(p.qty * current_price - p.qty * p.avg_entry for p in em.positions)
 
             # ── Persist positions after every cycle ───────────────────────────
             if em.positions:

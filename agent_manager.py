@@ -165,7 +165,7 @@ MANAGER_HTML = r"""<!DOCTYPE html>
 <title>dipu — agent manager</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#080808;color:#ddd;font-family:'Courier New',monospace;padding:28px}
+body{background:#080808;color:#fff;font-family:'Courier New',monospace;padding:28px}
 h1{color:#00e5ff;font-size:1.5rem;margin-bottom:4px}
 .sub{color:#fff;font-size:.78rem;margin-bottom:28px}
 h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;margin:24px 0 10px}
@@ -173,7 +173,7 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 .spawn-form{background:#0e0e0e;border:1px solid #1e1e1e;border-radius:8px;padding:20px;margin-bottom:28px;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
 .field{display:flex;flex-direction:column;gap:5px}
 .field label{font-size:.68rem;color:#fff;text-transform:uppercase;letter-spacing:.08em}
-.field input,.field select{background:#0a0a0a;border:1px solid #222;color:#ddd;padding:7px 10px;border-radius:5px;font-family:inherit;font-size:.8rem;min-width:160px}
+.field input,.field select{background:#0a0a0a;border:1px solid #222;color:#fff;padding:7px 10px;border-radius:5px;font-family:inherit;font-size:.8rem;min-width:160px}
 .btn{padding:8px 18px;border-radius:5px;border:none;cursor:pointer;font-family:inherit;font-size:.78rem;font-weight:bold;transition:.15s}
 .btn-spawn{background:#00e5ff;color:#000}.btn-spawn:hover{background:#00b8cc}
 .btn-stop{background:#ff1744;color:#fff}.btn-stop:hover{background:#cc0033}
@@ -199,7 +199,7 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 .fleet-header{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
 .fleet-title{color:#ff1744;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;font-weight:bold}
 .fleet-eq{color:#00e5ff;font-size:.95rem;font-weight:bold;margin-left:4px}
-.fleet-dd{font-size:.72rem;color:#aaa}
+.fleet-dd{font-size:.72rem;color:#fff}
 .fleet-controls{margin-left:auto;display:flex;gap:8px}
 .slot-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 @media(max-width:900px){.slot-grid{grid-template-columns:repeat(2,1fr)}}
@@ -207,15 +207,42 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 .slot-card{background:#0e0e0e;border:1px solid #1e1e1e;border-radius:8px;padding:14px;min-height:130px;position:relative}
 .slot-card.live{border-color:#1a3a2a}
 .slot-card.empty{opacity:.55}
-.slot-num{font-size:.62rem;color:#555;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px}
+.slot-num{font-size:.62rem;color:#fff;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px}
 .slot-sym{font-size:1.1rem;font-weight:bold;color:#fff;margin-bottom:6px}
 .slot-sym.active{color:#00e676}
-.slot-meta{font-size:.68rem;color:#aaa;line-height:1.8;margin-bottom:10px}
+.slot-meta{font-size:.68rem;color:#fff;line-height:1.8;margin-bottom:10px}
 .slot-meta .g{color:#00e676}.slot-meta .r{color:#ff1744}
 .slot-actions{display:flex;gap:6px;flex-wrap:wrap}
+/* ── Theme toggle button ── */
+#theme-btn{position:fixed;top:12px;right:16px;z-index:9999;background:#1e1e2e;border:1px solid #444;color:#e0e0ff;border-radius:20px;padding:5px 14px;cursor:pointer;font-family:'Courier New',monospace;font-size:.72rem;font-weight:bold;letter-spacing:.04em;box-shadow:0 2px 8px rgba(0,0,0,.5);transition:.2s}
+#theme-btn:hover{background:#2a2a3e;border-color:#00e5ff;color:#00e5ff}
+/* ── Day theme overrides ── */
+[data-theme="day"]{background:#f4f5f7;color:#1a1a2e}
+[data-theme="day"] h1,[data-theme="day"] h2{color:#0a0a1e}
+[data-theme="day"] .sub{color:#333}
+[data-theme="day"] #theme-btn{background:#e8e8f0;border-color:#aaa;color:#333;box-shadow:0 2px 8px rgba(0,0,0,.15)}
+[data-theme="day"] #theme-btn:hover{background:#d8d8ee;border-color:#0077bb;color:#0077bb}
+[data-theme="day"] .spawn-form{background:#eef0f3;border-color:#d4d8de}
+[data-theme="day"] .field input,[data-theme="day"] .field select{background:#fff;border-color:#ccc;color:#111}
+[data-theme="day"] .btn-open{background:#e4e6ea;color:#0077bb;border-color:#0077bb}
+[data-theme="day"] .btn-open:hover{background:#d4e4f0}
+[data-theme="day"] .agent-card{background:#fff;border-color:#dde0e6}
+[data-theme="day"] .agent-card.running{border-color:#aad4bb}
+[data-theme="day"] .agent-name{color:#0077bb}
+[data-theme="day"] .api-label{background:#eef0f3;border-color:#d4d8de;color:#333}
+[data-theme="day"] .status-bar{border-color:#e4e6ea;color:#444}
+[data-theme="day"] .fleet-panel{background:#eef0f3;border-color:#d4d8de}
+[data-theme="day"] .fleet-eq{color:#0077bb}
+[data-theme="day"] .slot-card{background:#fff;border-color:#dde0e6}
+[data-theme="day"] .slot-card.live{border-color:#aad4bb}
+[data-theme="day"] .slot-sym{color:#1a1a2e}
+[data-theme="day"] .slot-sym.active{color:#00875a}
+[data-theme="day"] .chk-label{color:#333}
+[data-theme="day"] .dot.off{background:#bbb}
 </style>
 </head>
 <body>
+<button id="theme-btn" onclick="toggleTheme()">☀ Day</button>
 <h1>&#9654; dipu — agent manager</h1>
 <div class="sub">Spawn and control independent dipu trading instances per environment</div>
 
@@ -258,7 +285,7 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
     </div>
   </div>
   <div class="slot-grid" id="fleet-slots">
-    <div style="color:#555;font-size:.75rem;grid-column:1/-1">Loading fleet state…</div>
+    <div style="color:#fff;font-size:.75rem;grid-column:1/-1">Loading fleet state…</div>
   </div>
 </div>
 
@@ -284,7 +311,7 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
     </div>
   </div>
   <div class="email-row" style="margin-top:12px">
-    <span style="color:#888;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;margin-right:16px">Notify on:</span>
+    <span style="color:#fff;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;margin-right:16px">Notify on:</span>
     <label class="chk-label"><input type="checkbox" id="chk-rotation"  checked> Coin rotation</label>
     <label class="chk-label"><input type="checkbox" id="chk-fills"     checked> Order fills</label>
     <label class="chk-label"><input type="checkbox" id="chk-coin"      checked> Coin traded (on change)</label>
@@ -304,7 +331,7 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 <style>
 .email-panel{background:#0e0e0e;border:1px solid #1e1e1e;border-radius:8px;padding:20px;margin-bottom:28px}
 .email-row{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
-.chk-label{display:flex;align-items:center;gap:6px;font-size:.72rem;color:#aaa;cursor:pointer;user-select:none}
+.chk-label{display:flex;align-items:center;gap:6px;font-size:.72rem;color:#fff;cursor:pointer;user-select:none}
 .chk-label input{accent-color:#00e676;width:14px;height:14px;cursor:pointer}
 </style>
 
@@ -435,7 +462,7 @@ async function loadPool() {
     const d = await r.json();
     renderFleet(d);
   } catch(e) {
-    document.getElementById('fleet-slots').innerHTML = '<div style="color:#555;font-size:.75rem;grid-column:1/-1">Pool offline</div>';
+    document.getElementById('fleet-slots').innerHTML = '<div style="color:#fff;font-size:.75rem;grid-column:1/-1">Pool offline</div>';
   }
 }
 
@@ -609,6 +636,23 @@ async function sendPnlNow() {
 }
 
 loadEmailConfig();
+
+// ── Theme toggle ──────────────────────────────────────────
+function _applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const btn = document.getElementById('theme-btn');
+  if (btn) btn.textContent = theme === 'day' ? '☾ Night' : '☀ Day';
+}
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'night';
+  const next = cur === 'day' ? 'night' : 'day';
+  localStorage.setItem('dipu-theme', next);
+  _applyTheme(next);
+}
+(function() {
+  const saved = localStorage.getItem('dipu-theme') || 'night';
+  _applyTheme(saved);
+})();
 </script>
 </body>
 </html>
@@ -633,7 +677,13 @@ class AgentManager:
         self._app.router.add_route("*", "/agent/{name}/{path:.*}", self._proxy)
 
     async def _dashboard(self, _):
-        return web.Response(text=MANAGER_HTML, content_type="text/html")
+        try:
+            import re as _re
+            src = open(__file__).read()
+            live_html = _re.search(r'MANAGER_HTML = r"""(.*?)^"""', src, _re.S | _re.M).group(1)
+        except Exception:
+            live_html = MANAGER_HTML
+        return web.Response(text=live_html, content_type="text/html")
 
     async def _list(self, _):
         # Re-sync from state file on every list call — picks up PIDs updated externally
