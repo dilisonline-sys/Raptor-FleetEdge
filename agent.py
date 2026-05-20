@@ -210,32 +210,23 @@ async def main_loop():
     await fg.connect()
 
     # Initialise day_start_equity from the persistent portfolio_tracker baseline.
-    # This avoids false halts from transient equity spikes on the very first REST call.
-    # The portfolio_tracker file is written by reset_day_start() and survives restarts.
+    # Subtract earn_value so the baseline is spot-consistent with per-cycle equity
+    # (earn is not included in the per-cycle equity passed to update_metrics).
+    # This avoids false halts from transient REST spikes on first startup call.
     import portfolio_tracker as _pt_init
     _pf_init = _pt_init.get_portfolio_state()
-    _day_start = _pf_init.get("day_start", 0.0)
-    if _day_start > 0:
-        risk.day_start_equity   = _day_start
-        risk.month_start_equity = _day_start
-        log("AGENT", "DAY_START_FROM_PORTFOLIO", day_start=round(_day_start, 2))
+    _port_day_start = _pf_init.get("day_start", 0.0)
+    _earn_val       = _pf_init.get("earn_value", 0.0)
+    _spot_day_start = _port_day_start - _earn_val  # strip earn so it matches per-cycle equity
+    if _spot_day_start > 0:
+        risk.day_start_equity   = _spot_day_start
+        risk.month_start_equity = _spot_day_start
+        log("AGENT", "DAY_START_FROM_PORTFOLIO",
+            day_start=round(_spot_day_start, 2), earn_stripped=round(_earn_val, 2))
     else:
-        # Fallback: fetch live equity and use it as the baseline (original behaviour)
-        try:
-            import aiohttp as _aio
-            async with _aio.ClientSession() as _s:
-                _init_sym = "BTCUSDT" if cfg.TRADING_MODE == "live" else (os.environ.get("AGENT_SYMBOL", "BTCUSDT") or "BTCUSDT")
-                async with _s.get("https://api.binance.com/api/v3/ticker/price",
-                                   params={"symbol": _init_sym},
-                                   timeout=_aio.ClientTimeout(total=5)) as _r:
-                    _init_price = float((await _r.json()).get("price", 0))
-        except Exception:
-            _init_price = 0.0
-        _init_equity = await om.get_equity(
-            symbol=os.environ.get("AGENT_SYMBOL", "") or cfg.SYMBOL,
-            price=_init_price if _init_price else None,
-        )
-        risk.update_metrics(_init_equity)
+        # Fallback: fetch live equity on startup (used if no portfolio day file exists yet)
+        _init_equity = await om.get_balances_raw(cfg.SYMBOL)
+        risk.update_metrics(_init_equity[0])  # index 0 = non-base usdt equiv
 
     async def _price_pusher():
         """Push live WS ticker price to dashboard state every 1s for chart live-tick."""
