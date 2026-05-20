@@ -1,5 +1,15 @@
 """
-Agent Monitor — checks all running dipu agents every 30 minutes for issues.
+Agent Monitor — checks all running dipu agents every 30 minutes for issues
+and auto-resolves halts when it is safe to do so.
+
+Auto-resolution (runs before the health check each cycle):
+  - Queries each agent's /api/state for live halt status
+  - If halt=True AND today's daily drawdown < AUTO_RESUME_DD_THRESHOLD (5%):
+      1. Sends RESUME instruction to clear halt_flag / halt_until
+      2. Waits 2 s, then sends RESET_DAY_START to reset risk baselines to
+         current equity (prevents immediate re-halt on next metrics update)
+      3. Resets /tmp/dipu_portfolio_day.json baseline to current total assets
+  - Skips auto-resume when today's DD is still ≥ threshold (active loss)
 
 Checks performed:
   - LOOP_ERROR bursts (numpy/json crashes, unexpected exceptions)
@@ -8,13 +18,15 @@ Checks performed:
   - High daily drawdown (> 8% — warning before 10% halt)
   - Stale log (agent not logging — possible freeze)
 
-Writes a report to /tmp/dipu_monitor.log and emails it if issues found
-(or always, so you get a clean 'all OK' heartbeat every 30 min).
+Writes a report to /tmp/dipu_monitor.log and always emails a report —
+clean 'all OK' heartbeat every 30 min, or flagged report with resolutions.
 """
 
 import json
 import os
 import time
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,11 +34,13 @@ POOL_FILE     = Path("/tmp/dipu_equity_pool.json")
 LOG_DIR       = Path("/tmp")
 MONITOR_LOG   = Path("/tmp/dipu_monitor.log")
 SLOT_NAMES    = {0: "dipu-live", 1: "dipu-live-1", 2: "dipu-live-2", 3: "dipu-live-3"}
+AGENT_PORTS   = {0: 7434, 1: 7435, 2: 7436, 3: 7437}
 WINDOW_SECS   = 30 * 60           # look back 30 min for log issues
 STALE_SECS    = 120               # agent log silent for 2 min = stale
 ERROR_BURST   = 3                 # ≥3 LOOP_ERRORs in window = issue
 DD_WARN_PCT   = 8.0               # warn before 10% halt threshold
 SLOT_TTL      = 90                # pool heartbeat TTL (seconds)
+AUTO_RESUME_DD_THRESHOLD = 5.0    # auto-resume halted agent only if today's DD < this %
 
 
 def _now_utc() -> str:
@@ -39,6 +53,135 @@ def _parse_ts(ts_str: str) -> float:
         return datetime.fromisoformat(ts_str).timestamp()
     except Exception:
         return 0.0
+
+
+def _get_agent_state(port: int) -> dict | None:
+    """Fetch live agent state via HTTP /api/state."""
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/state",
+            headers={"X-Agent-Token": "internal"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+
+def _send_instruction(port: int, action: str, **kwargs) -> bool:
+    """POST an instruction to a running agent; returns True on success."""
+    try:
+        payload = json.dumps({"action": action, "source": "auto_monitor", **kwargs}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/instruction",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Agent-Token": "internal",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _reset_portfolio_day_start() -> float:
+    """Reset /tmp/dipu_portfolio_day.json to today's total assets. Returns new baseline."""
+    try:
+        import portfolio_tracker as _pt
+        state = _pt.get_portfolio_state()
+        total = state.get("total_assets", 0.0)
+        if total <= 0:
+            return 0.0
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        day_file = Path("/tmp/dipu_portfolio_day.json")
+        existing: dict = {}
+        if day_file.exists():
+            try:
+                with open(day_file) as f:
+                    existing = json.load(f)
+            except Exception:
+                pass
+        existing.update({"assets": total, "ts": time.time(), "date": today})
+        with open(day_file, "w") as f:
+            json.dump(existing, f)
+        return total
+    except Exception:
+        return 0.0
+
+
+def auto_resolve() -> list[dict]:
+    """
+    Inspect each agent via HTTP and auto-resume any that are halted but whose
+    today's daily drawdown is below AUTO_RESUME_DD_THRESHOLD.
+
+    Steps per halted agent:
+      1. Send RESUME to clear halt_flag / halt_until.
+      2. Wait 2 s for the instruction to be consumed.
+      3. Send RESET_DAY_START to reset risk baselines to current equity so
+         the agent doesn't immediately re-halt on the next metrics update.
+
+    After all resumes, resets the portfolio day-start file so the new
+    baseline is persisted for future restarts.
+
+    Returns a list of resolution-result dicts (one per inspected slot).
+    """
+    resolved: list[dict] = []
+    any_resumed = False
+
+    for slot_id in range(4):
+        name = SLOT_NAMES[slot_id]
+        port = AGENT_PORTS[slot_id]
+
+        state = _get_agent_state(port)
+        if state is None:
+            resolved.append({
+                "slot": slot_id, "name": name,
+                "action": "UNREACHABLE",
+                "reason": "Agent did not respond — may be stopped",
+            })
+            continue
+
+        if not state.get("halt"):
+            continue  # healthy — nothing to do
+
+        daily_dd = state.get("daily_dd", 0.0)  # already in percent units
+
+        if daily_dd >= AUTO_RESUME_DD_THRESHOLD:
+            resolved.append({
+                "slot": slot_id, "name": name,
+                "action": "SKIPPED",
+                "reason": (
+                    f"Daily DD {daily_dd:.1f}% still above {AUTO_RESUME_DD_THRESHOLD}% threshold"
+                    f" — not auto-resuming (active loss situation)"
+                ),
+            })
+            continue
+
+        resume_ok = _send_instruction(port, "RESUME")
+        time.sleep(2)
+        reset_ok  = _send_instruction(port, "RESET_DAY_START")
+        any_resumed = True
+
+        resolved.append({
+            "slot":       slot_id,
+            "name":       name,
+            "action":     "RESUMED",
+            "resume_ok":  resume_ok,
+            "reset_ok":   reset_ok,
+            "daily_dd_pct": round(daily_dd, 2),
+            "reason": (
+                f"Auto-resumed: halt active but today's DD {daily_dd:.1f}% "
+                f"is below {AUTO_RESUME_DD_THRESHOLD}% safe threshold"
+            ),
+        })
+
+    if any_resumed:
+        _reset_portfolio_day_start()
+
+    return resolved
 
 
 def _read_pool() -> dict:
@@ -116,17 +259,23 @@ def run_check() -> dict:
     slot_report = {}
 
     for slot_id in range(4):
-        name   = SLOT_NAMES[slot_id]
-        s      = slots.get(str(slot_id))
-        log    = _scan_agent_log(name, since)
+        name     = SLOT_NAMES[slot_id]
+        port     = AGENT_PORTS[slot_id]
+        s        = slots.get(str(slot_id))
+        log      = _scan_agent_log(name, since)
+        live     = _get_agent_state(port)
+
+        # Prefer live HTTP state for halt flag — more accurate than log scan
+        live_halt = live.get("halt", False) if live else log["halted"]
 
         entry = {
             "name":        name,
-            "symbol":      s["symbol"]      if s else "—",
+            "symbol":      s["symbol"]      if s else (live.get("symbol", "—") if live else "—"),
             "open_usdt":   s["open_usdt"]   if s else 0.0,
             "daily_pnl":   s["daily_pnl"]   if s else 0.0,
+            "daily_dd":    live.get("daily_dd", 0.0) if live else 0.0,
             "loop_errors": log["loop_errors"],
-            "halted":      log["halted"],
+            "halted":      live_halt,
             "log_exists":  log["log_exists"],
         }
 
@@ -221,8 +370,11 @@ def write_report(result: dict) -> str:
         "=" * 64,
     ]
 
-    if result["healthy"]:
+    resumed = result.get("auto_resumed", 0)
+    if result["healthy"] and not resumed:
         lines.append("  STATUS: ALL OK — no issues detected")
+    elif resumed:
+        lines.append(f"  STATUS: {resumed} AGENT(S) AUTO-RESUMED — see Resolutions below")
     else:
         lines.append(f"  STATUS: {len(result['issues'])} ISSUE(S) FOUND")
 
@@ -261,6 +413,16 @@ def write_report(result: dict) -> str:
         for iss in result["issues"]:
             lines.append(f"  [{iss['severity']:8s}] Slot {iss['slot']} {iss['name']}: {iss['msg']}")
 
+    resolutions = result.get("resolutions", [])
+    acted = [r for r in resolutions if r.get("action") in ("RESUMED", "SKIPPED")]
+    if acted:
+        lines.append("")
+        lines.append("  AUTO-RESOLUTION")
+        lines.append("  " + "-" * 60)
+        for r in acted:
+            tag = "RESUMED " if r["action"] == "RESUMED" else "SKIPPED "
+            lines.append(f"  [{tag}] Slot {r['slot']} {r['name']}: {r['reason']}")
+
     lines.append("")
     text = "\n".join(lines) + "\n"
 
@@ -288,8 +450,16 @@ def send_monitor_email(result: dict) -> bool:
         if not cfg.get("enabled") or not cfg.get("recipient"):
             return False
 
-        status_color = "#00e676" if result["healthy"] else "#ff1744"
-        status_text  = "ALL OK" if result["healthy"] else f"{len(result['issues'])} ISSUE(S)"
+        resumed_count = result.get("auto_resumed", 0)
+        if result["healthy"] and not resumed_count:
+            status_color = "#00e676"
+            status_text  = "ALL OK"
+        elif resumed_count:
+            status_color = "#ffd600"
+            status_text  = f"{resumed_count} AGENT(S) AUTO-RESUMED"
+        else:
+            status_color = "#ff1744"
+            status_text  = f"{len(result['issues'])} ISSUE(S)"
 
         # Slot rows
         slot_rows = ""
@@ -356,6 +526,32 @@ def send_monitor_email(result: dict) -> bool:
                 f'<ul style="margin:0;padding-left:18px">{issue_items}</ul>'
             )
 
+        # Auto-resolution rows
+        resolution_html = ""
+        resolutions = result.get("resolutions", [])
+        acted = [r for r in resolutions if r.get("action") in ("RESUMED", "SKIPPED")]
+        if acted:
+            res_items = ""
+            for r in acted:
+                if r["action"] == "RESUMED":
+                    icon  = "&#x2705;"  # ✅
+                    color = "#00e676"
+                    label = "RESUMED"
+                else:
+                    icon  = "&#x26A0;"  # ⚠
+                    color = "#ffd600"
+                    label = "SKIPPED"
+                res_items += (
+                    f'<li style="margin:6px 0">'
+                    f'<span style="color:{color};font-weight:bold">{icon} [{label}]</span> '
+                    f'<span style="color:#fff">{r["name"]}: {r["reason"]}</span>'
+                    f'</li>'
+                )
+            resolution_html = (
+                f'<p style="color:#fff;margin:16px 0 6px">&#x1F527; Auto-resolution actions:</p>'
+                f'<ul style="margin:0;padding-left:18px">{res_items}</ul>'
+            )
+
         html = _em._style_wrap(f"""
           <h2 style="color:{status_color};margin:0 0 4px">&#x1F916; Agent Health Check</h2>
           <p style="color:#fff;font-size:12px;margin:0 0 16px">{result['ts']}</p>
@@ -375,15 +571,17 @@ def send_monitor_email(result: dict) -> bool:
             <tbody>{slot_rows}</tbody>
           </table>
           {issue_html}
+          {resolution_html}
           <p style="color:#444;font-size:11px;margin:16px 0 0">
             Log: /tmp/dipu_monitor.log &nbsp;|&nbsp; Check interval: 30 min
           </p>""")
 
-        subject = (
-            f"[dipu] Health OK — {result['ts']}"
-            if result["healthy"]
-            else f"[dipu] ⚠ {len(result['issues'])} issue(s) detected — {result['ts']}"
-        )
+        if result.get("auto_resumed"):
+            subject = f"[dipu] ✅ {result['auto_resumed']} agent(s) auto-resumed — {result['ts']}"
+        elif result["healthy"]:
+            subject = f"[dipu] Health OK — {result['ts']}"
+        else:
+            subject = f"[dipu] ⚠ {len(result['issues'])} issue(s) detected — {result['ts']}"
         return _em._send(subject, html)
     except Exception as e:
         print(f"[monitor] email failed: {e}")
@@ -391,8 +589,20 @@ def send_monitor_email(result: dict) -> bool:
 
 
 def check_and_report() -> dict:
-    """Run check, write log, send email. Called by the manager scheduler."""
+    """
+    Run auto-resolution, health check, write log, send email.
+    Called by the manager scheduler every 30 minutes.
+    """
+    resolutions = auto_resolve()
     result = run_check()
+    result["resolutions"] = resolutions
+
+    # If anything was auto-resolved, mark as not fully healthy so the
+    # email subject is flagged — operator should know action was taken.
+    resumed_count = sum(1 for r in resolutions if r.get("action") == "RESUMED")
+    if resumed_count:
+        result["auto_resumed"] = resumed_count
+
     write_report(result)
     send_monitor_email(result)
     return result

@@ -528,6 +528,13 @@ async def main_loop():
                         pending_override = "SELL"  # close position this cycle
                     push_log("[FORCE_BTC] Queued — will close position and switch to BTCUSDT (locked)")
                     log("AGENT", "FORCE_BTC_QUEUED", current=active_symbol)
+                elif action == "RESET_DAY_START":
+                    _raw_reset = await om.get_balances_raw(cfg.SYMBOL)
+                    _reset_eq  = _raw_reset[0] if _raw_reset else equity
+                    risk.day_start_equity   = _reset_eq
+                    risk.month_start_equity = _reset_eq
+                    push_log(f"[RESET_DAY_START] Risk baselines reset to ${_reset_eq:.2f}")
+                    log("AGENT", "DAY_START_RESET", equity=round(_reset_eq, 2), source=instr.get("source", ""))
                 elif action == "RESUME_AUTO":
                     update_state(coin_mode="auto")
                     push_log("[RESUME_AUTO] Auto-scanner re-enabled — will switch to best coin next cycle")
