@@ -363,6 +363,7 @@ Each agent accepts POST instructions at `/instruction`. Valid actions:
 | `CLOSE_ALL` | Submit market sell and clear all positions |
 | `HALT` | Emergency halt — stop trading |
 | `RESUME` | Resume after halt |
+| `RESET_DAY_START` | Reset risk baselines (`day_start_equity` / `month_start_equity`) to current equity — use after `RESUME` to prevent immediate re-halt |
 | `SWITCH_COIN` | Switch to a specific symbol (e.g. `"symbol":"SOLUSDT"`) |
 | `RESUME_AUTO` | Return to scanner-driven coin selection |
 | `FORCE_BTC` | Switch to BTCUSDT immediately |
@@ -436,7 +437,7 @@ Before switching to `TRADING_MODE=live`:
 | `regime.py` | TRENDING / RANGING / VOLATILE classification |
 | `equity_pool.py` | Shared pool — coordinates budgets, coin exclusions, earn value across agents |
 | `portfolio_tracker.py` | Full account P&L — USDT + spot positions + Simple Earn (Flexible) holdings |
-| `agent_monitor.py` | 30-minute health check — email report with fleet status and portfolio summary |
+| `agent_monitor.py` | 30-minute health check with auto-resolution — resumes halted agents, resets baselines, emails report |
 | `ai_analyst.py` | Claude Haiku advisory analyst |
 | `email_notifier.py` | Email alerts — fills, rotations, 4h P&L reports |
 | `instruction_server.py` | Per-agent HTTP dashboard and instruction endpoint |
@@ -462,12 +463,26 @@ This value is shown in the **PORTFOLIO card** on every agent dashboard and inclu
 
 ## Health Monitor
 
-`agent_monitor.py` runs an independent health check every 30 minutes and emails a fleet summary including:
+`agent_monitor.py` runs an independent health check every 30 minutes. It **auto-resolves halts** before reporting, then emails a full fleet summary.
 
-- Agent state (RUNNING / STOPPED / HALTED)
-- Per-slot open positions and P&L
+### Auto-resolution logic
+
+Before each check the monitor queries every agent's live state via HTTP. If an agent is halted but today's daily drawdown is below 5% (i.e. it's a new UTC day and the drawdown counter has reset):
+
+1. Sends `RESUME` to clear the halt flag
+2. Waits 2 seconds, then sends `RESET_DAY_START` to reset the risk engine baselines to current equity — this prevents the agent from immediately re-halting on its next metrics update
+3. Resets `/tmp/dipu_portfolio_day.json` so future restarts also use the correct baseline
+
+If today's drawdown is still ≥ 5% the agent is left halted (active loss situation — the safeguard should hold).
+
+### Email report contents
+
+- **Status** — `ALL OK`, `N agent(s) auto-resumed`, or `N issue(s) detected`
+- Agent state per slot (RUNNING / HALTED / LOOP_ERR)
+- Per-slot open positions and daily P&L
 - Full portfolio breakdown (USDT + Spot + Earn)
-- Any risk alerts or anomalies
+- Auto-resolution actions taken (✅ RESUMED / ⚠ SKIPPED with reason)
+- Any remaining risk alerts or anomalies
 
 Configure the monitor with the same email settings used for trade notifications.
 
