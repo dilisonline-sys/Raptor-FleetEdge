@@ -404,7 +404,7 @@ async def main_loop():
 
     log("AGENT", "READY", symbol=active_symbol, testnet=cfg.USE_TESTNET, equity=round(equity, 2))
     _session_start_equity = equity          # baseline for lifetime session P&L
-    _session_start_ts     = time.time()
+    _session_start_ts     = _time.time()
     update_state(equity=equity, symbol=active_symbol,
                  session_start_equity=round(_session_start_equity, 2),
                  session_start_ts=_session_start_ts,
