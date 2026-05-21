@@ -1062,14 +1062,24 @@ async def main_loop():
                         for r in scanner.ranked[:8]
                     ]
                     try:
-                        _sel_result = await selector.select(_sel_candidates, interval_secs=0)
-                        if _sel_result and _sel_result.get("recommendations"):
+                        _sel_result = await selector.select(
+                            _sel_candidates, fear_greed=fear_greed, interval_secs=0
+                        )
+                        if _sel_result:
+                            # Only act on coins the AI confirmed as profitable
+                            _profitable_recs = [
+                                r for r in _sel_result.get("recommendations", [])
+                                if r.get("profitable") and r.get("confidence", 0) >= 65
+                            ]
+                            push_log(f"[AI_SELECT] Market: {_sel_result.get('market_comment','')} | Profitable picks: {[r['symbol'] for r in _profitable_recs]}")
                             _pool_excl = _ep.get_other_symbols(_agent_slot)
-                            for _rec in _sel_result["recommendations"]:
-                                if _rec["symbol"] not in _pool_excl and _rec.get("confidence", 0) >= 60:
+                            _assigned  = False
+                            for _rec in _profitable_recs:
+                                if _rec["symbol"] not in _pool_excl:
                                     _sel_sym = _rec["symbol"]
-                                    push_log(f"[AI_SELECT] → {_sel_sym} (confidence={_rec['confidence']}%): {_rec.get('reason','')}")
-                                    log("AGENT", "AI_SELECT_ASSIGN", symbol=_sel_sym, confidence=_rec["confidence"])
+                                    push_log(f"[AI_SELECT] → {_sel_sym} conf={_rec['confidence']}% est_rr={_rec.get('est_rr','?')}x | {_rec.get('reason','')}")
+                                    log("AGENT", "AI_SELECT_ASSIGN", symbol=_sel_sym,
+                                        confidence=_rec["confidence"], est_rr=_rec.get("est_rr"))
                                     if _sel_sym != active_symbol:
                                         await _liquidate_before_switch(active_symbol)
                                         await md.close()
@@ -1079,10 +1089,12 @@ async def main_loop():
                                         _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
                                         update_state(symbol=active_symbol)
                                         none_signal_streak = 0
-                                    selector.last_result = {}  # clear after use
+                                    selector.last_result = {}
+                                    _assigned = True
                                     break
-                            else:
-                                push_log(f"[AI_SELECT] No confident picks — staying on {active_symbol}")
+                            if not _assigned:
+                                avoided = _sel_result.get("avoided", [])
+                                push_log(f"[AI_SELECT] No profitable coin found — avoided: {avoided} | scanner continues")
                         else:
                             push_log(f"[AI_SELECT] AI unavailable — scanner continues as normal")
                     except Exception as _sel_e:
