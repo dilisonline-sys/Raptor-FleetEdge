@@ -458,6 +458,11 @@ async def main_loop():
                     except Exception as _btc_sell_e:
                         log("AGENT", "ORPHAN_BTC_SELL_ERROR", error=str(_btc_sell_e)[:80])
                     continue
+                # Skip coins already being managed by another slot — those coins belong to them
+                _pool_managed = _ep.get_other_symbols(_agent_slot)
+                if _sym in _pool_managed:
+                    push_log(f"[ORPHAN_SWEEP] Slot {_agent_slot}: skipping {_asset} (${_val:.2f}) — managed by another slot")
+                    continue
                 # If we hold a coin that isn't the active symbol, switch to it
                 if _sym != active_symbol:
                     push_log(f"[ORPHAN_SWEEP] Found {_qty:.4f} {_asset} (${_val:.2f}) — switching to {_sym}")
