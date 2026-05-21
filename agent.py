@@ -403,7 +403,12 @@ async def main_loop():
             log("AGENT", "PRE_SWITCH_SELL_ERROR", symbol=symbol, error=str(_liq_e))
 
     log("AGENT", "READY", symbol=active_symbol, testnet=cfg.USE_TESTNET, equity=round(equity, 2))
-    update_state(equity=equity, symbol=active_symbol)
+    _session_start_equity = equity          # baseline for lifetime session P&L
+    _session_start_ts     = time.time()
+    update_state(equity=equity, symbol=active_symbol,
+                 session_start_equity=round(_session_start_equity, 2),
+                 session_start_ts=_session_start_ts,
+                 session_pnl=0.0, session_pnl_pct=0.0)
 
     # ── Staggered startup: let earlier slots register in pool before this one
     # scans for a coin, preventing all agents from picking the same top coin simultaneously.
@@ -991,12 +996,17 @@ async def main_loop():
             risk.update_metrics(equity)
             import portfolio_tracker as _pt
             _pf = _pt.get_portfolio_state()
+            _s_pnl     = equity - _session_start_equity
+            _s_pnl_pct = (_s_pnl / _session_start_equity * 100) if _session_start_equity else 0
             update_state(
                 equity=equity,
                 daily_dd=((risk.day_start_equity - equity) / risk.day_start_equity * 100)
                           if risk.day_start_equity else 0,
                 halt=risk.halt_flag,
                 portfolio=_pf,
+                session_pnl=round(_s_pnl, 2),
+                session_pnl_pct=round(_s_pnl_pct, 2),
+                session_start_equity=round(_session_start_equity, 2),
             )
 
             # ── Position heartbeat (displayed every cycle in live log) ────
