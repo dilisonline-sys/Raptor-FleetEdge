@@ -448,6 +448,16 @@ async def main_loop():
                 if _agent_slot == 0 and _sym != "BTCUSDT":
                     push_log(f"[ORPHAN_SWEEP] Slot 0 (BTC-locked): ignoring {_qty:.4f} {_asset} (${_val:.2f}) — will be recovered by another slot")
                     continue
+                # Non-slot-0 must never take over BTCUSDT — sell the holding and let slot 0 own BTC
+                if _agent_slot != 0 and _sym == "BTCUSDT":
+                    push_log(f"[ORPHAN_SWEEP] Slot {_agent_slot}: found BTC (${_val:.2f}) — selling (slot 0 owns BTC)")
+                    log("AGENT", "ORPHAN_BTC_SELL", slot=_agent_slot, qty=round(_qty, 6), usdt_val=round(_val, 2))
+                    try:
+                        _tick_btc = await om.get_tick_size("BTCUSDT")
+                        await om.submit("SELL", _qty, _tick_btc, {}, symbol="BTCUSDT")
+                    except Exception as _btc_sell_e:
+                        log("AGENT", "ORPHAN_BTC_SELL_ERROR", error=str(_btc_sell_e)[:80])
+                    continue
                 # If we hold a coin that isn't the active symbol, switch to it
                 if _sym != active_symbol:
                     push_log(f"[ORPHAN_SWEEP] Found {_qty:.4f} {_asset} (${_val:.2f}) — switching to {_sym}")
