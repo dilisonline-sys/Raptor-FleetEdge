@@ -710,11 +710,19 @@ async def main_loop():
                                  candles, regime, fear_greed, _pos_info)
                 )
                 # Act on previous cycle's completed analysis — rotate if AI confidence < 50
+                # Guard: only rotate if scanner has a coin that scores meaningfully better,
+                # preventing endless spinning when the whole market is low-confidence.
                 _ai_last = analyst.last_analysis
                 _ai_conf = _ai_last.get("confidence", 100) if _ai_last else 100
                 _ai_rotate_flag = _ai_last.get("suggest_rotation", False) if _ai_last else False
                 _ai_for_sym = _ai_last.get("symbol", "") if _ai_last else ""
                 _now_ts = _time.time()
+                # Find if there's a scanner-ranked coin better than current
+                _pool_excl = _ep.get_other_symbols(_agent_slot)
+                _cur_rank = next((r for r in scanner.ranked if r["symbol"] == active_symbol), None)
+                _best_rank = next((r for r in scanner.ranked if r["symbol"] not in _pool_excl and r["symbol"] != active_symbol), None)
+                _has_better = (_best_rank and _cur_rank and
+                               _best_rank.get("deep_score", 0) > _cur_rank.get("deep_score", 0) * 1.2)
                 if (
                     _ai_rotate_flag
                     and _ai_for_sym == active_symbol
@@ -722,25 +730,23 @@ async def main_loop():
                     and coin_mode == "auto"
                     and _agent_slot != 0
                     and _now_ts - _ai_rotate_last >= AI_ROTATE_COOLDOWN
+                    and _has_better
                 ):
-                    push_log(f"[AI_ROTATE] Confidence={_ai_conf}% < 50 on {active_symbol} — switching coin")
-                    log("AGENT", "AI_ROTATION", symbol=active_symbol, confidence=_ai_conf)
+                    push_log(f"[AI_ROTATE] Confidence={_ai_conf}% on {active_symbol} — better option {_best_rank['symbol']} available, switching")
+                    log("AGENT", "AI_ROTATION", symbol=active_symbol, confidence=_ai_conf, to=_best_rank["symbol"])
                     _ai_rotate_last = _now_ts
                     analyst.last_analysis = {}  # clear so we don't re-trigger next cycle
-                    _pool_excl = _ep.get_other_symbols(_agent_slot)
-                    _pool_excl.add(active_symbol)
-                    new_symbol = await scanner.scan(exclude=_pool_excl, force=True)
-                    if new_symbol and new_symbol != active_symbol:
-                        await _liquidate_before_switch(active_symbol)
-                        await md.close()
-                        active_symbol = new_symbol
-                        md = MarketData(active_symbol, cfg.INTERVAL)
-                        await md.connect()
-                        _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
-                        update_state(symbol=active_symbol, coin_mode="auto")
-                        none_signal_streak = 0
-                        await _cycle_sleep()
-                        continue
+                    new_symbol = _best_rank["symbol"]
+                    await _liquidate_before_switch(active_symbol)
+                    await md.close()
+                    active_symbol = new_symbol
+                    md = MarketData(active_symbol, cfg.INTERVAL)
+                    await md.connect()
+                    _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
+                    update_state(symbol=active_symbol, coin_mode="auto")
+                    none_signal_streak = 0
+                    await _cycle_sleep()
+                    continue
 
             # ── RANGING: immediately rotate to the next best ranked coin ─────
             if regime == "RANGING" and not em.positions and _agent_slot != 0:
@@ -994,10 +1000,10 @@ async def main_loop():
                 if signal == "BUY" and pre_rr < MIN_ENTRY_RR:
                     push_log(f"[SKIP] {active_symbol} R:R {pre_rr:.2f}x < {MIN_ENTRY_RR} minimum — skipping entry")
                     signal = "NONE"
-                # Fear & Greed gate — no new longs when market is in Fear (< 35)
+                # Fear & Greed gate — only block in Extreme Fear (< 20), not regular Fear
                 _fg_val = fear_greed.get("value", 50) if fear_greed else 50
-                if signal == "BUY" and _fg_val < 35:
-                    push_log(f"[SKIP] {active_symbol} Fear&Greed={_fg_val} (Fear) — no new longs, waiting for neutral market")
+                if signal == "BUY" and _fg_val < 20:
+                    push_log(f"[SKIP] {active_symbol} Fear&Greed={_fg_val} (Extreme Fear) — no new longs")
                     signal = "NONE"
                 # ATR cap: reject extremely volatile coins — the same volatility that scores them
                 # high will blow through stops on normal noise (FIDA: 4.1% ATR → stop hit -11%)
