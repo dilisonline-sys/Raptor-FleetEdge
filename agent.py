@@ -406,6 +406,7 @@ async def main_loop():
     _session_start_equity  = equity         # baseline for session P&L % only
     _session_realized_pnl  = 0.0           # sum of all closed-trade P&L this session
     _session_start_ts      = _time.time()
+    _ai_auto_active        = False          # True when AI was auto-activated by P&L monitor
     update_state(equity=equity, symbol=active_symbol,
                  session_start_equity=round(_session_start_equity, 2),
                  session_start_ts=_session_start_ts,
@@ -1035,6 +1036,21 @@ async def main_loop():
                 session_pnl_pct=round(_s_pnl_pct, 2),
                 session_start_equity=round(_session_start_equity, 2),
             )
+
+            # ── AI auto-assist: activate when session P&L ≤ 0, stop at +0.1% ─
+            _ai_recover_threshold = _session_start_equity * 0.001  # 0.1%
+            if _s_pnl <= 0 and not analyst.enabled:
+                analyst.toggle(True)
+                _ai_auto_active = True
+                update_state(ai_analyst_enabled=True, ai_analysis={})
+                push_log(f"[AI_AUTO] Session P&L {_s_pnl:+.4f} ≤ 0 — AI analyst activated to assist recovery")
+                log("AGENT", "AI_AUTO_ON", session_pnl=round(_s_pnl, 4))
+            elif _ai_auto_active and _s_pnl >= _ai_recover_threshold and analyst.enabled:
+                analyst.toggle(False)
+                _ai_auto_active = False
+                update_state(ai_analyst_enabled=False)
+                push_log(f"[AI_AUTO] Session P&L {_s_pnl:+.4f} ≥ +0.1% target — AI analyst deactivated")
+                log("AGENT", "AI_AUTO_OFF", session_pnl=round(_s_pnl, 4), threshold=round(_ai_recover_threshold, 4))
 
             # ── Position heartbeat (displayed every cycle in live log) ────
             if em.positions:
