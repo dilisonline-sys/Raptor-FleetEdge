@@ -453,7 +453,7 @@ async def main_loop():
                     push_log(f"[ORPHAN_SWEEP] Slot {_agent_slot}: found BTC (${_val:.2f}) — selling (slot 0 owns BTC)")
                     log("AGENT", "ORPHAN_BTC_SELL", slot=_agent_slot, qty=round(_qty, 6), usdt_val=round(_val, 2))
                     try:
-                        _tick_btc = await om.get_tick_size("BTCUSDT")
+                        _tick_btc = await om.get_lot_step("BTCUSDT")
                         await om.submit("SELL", _qty, _tick_btc, {}, symbol="BTCUSDT")
                     except Exception as _btc_sell_e:
                         log("AGENT", "ORPHAN_BTC_SELL_ERROR", error=str(_btc_sell_e)[:80])
@@ -968,7 +968,9 @@ async def main_loop():
                     push_log(f"[AI_SELECT] Firing for slot {_agent_slot} | excluded={sorted(_hard_excl)} | candidates={[c['symbol'] for c in _sel_candidates[:5]]}")
 
                     if not _sel_candidates:
-                        push_log(f"[AI_SELECT] No candidates after exclusion — holding {active_symbol}")
+                        push_log(f"[AI_SELECT] No candidates after exclusion — will retry in 15m")
+                        _ai_sel_triggered  = False
+                        _ai_sel_pending_ts = _time.time() + 900
                     else:
                         try:
                             _sel_result = await selector.select(
@@ -1000,11 +1002,17 @@ async def main_loop():
                                     _assigned = True
                                     break
                                 if not _assigned:
-                                    push_log(f"[AI_SELECT] No profitable pick after exclusion — holding {active_symbol}")
+                                    push_log(f"[AI_SELECT] No profitable pick — will retry in 15m")
+                                    _ai_sel_triggered  = False
+                                    _ai_sel_pending_ts = _time.time() + 900
                             else:
-                                push_log(f"[AI_SELECT] AI unavailable — holding {active_symbol}")
+                                push_log(f"[AI_SELECT] AI unavailable — will retry in 15m")
+                                _ai_sel_triggered  = False
+                                _ai_sel_pending_ts = _time.time() + 900
                         except Exception as _sel_e:
                             log("AI_SELECTOR", "TRIGGER_ERROR", error=str(_sel_e)[:80])
+                            _ai_sel_triggered  = False
+                            _ai_sel_pending_ts = _time.time() + 900
 
             # ── Position heartbeat (displayed every cycle in live log) ────
             if em.positions:
