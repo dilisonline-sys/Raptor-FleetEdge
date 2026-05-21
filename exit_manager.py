@@ -59,15 +59,21 @@ class ExitManager:
         risk       = abs(entry - stop) * qty
         direction  = 1 if side == "BUY" else -1
         h1_range   = ind.get("h1_range", 0)
+        # ATR-based TPs are the hard floor — h1_range TPs can extend further but never closer
+        tp1_atr = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP1_R
+        tp2_atr = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP2_R
+        tp3_atr = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP3_R
         if h1_range > 0:
-            # Anchor TPs to the actual 1h price range so they land within observed volatility
-            tp1 = entry + direction * h1_range * 0.40
-            tp2 = entry + direction * h1_range * 0.80
-            tp3 = entry + direction * h1_range * 1.25
+            tp1_h1 = entry + direction * h1_range * 0.40
+            tp2_h1 = entry + direction * h1_range * 0.80
+            tp3_h1 = entry + direction * h1_range * 1.25
+            # Take whichever is further from entry — prevents h1_range collapsing TPs in quiet markets
+            if direction == 1:
+                tp1, tp2, tp3 = max(tp1_h1, tp1_atr), max(tp2_h1, tp2_atr), max(tp3_h1, tp3_atr)
+            else:
+                tp1, tp2, tp3 = min(tp1_h1, tp1_atr), min(tp2_h1, tp2_atr), min(tp3_h1, tp3_atr)
         else:
-            tp1 = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP1_R
-            tp2 = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP2_R
-            tp3 = entry + direction * atr * cfg.ATR_STOP_MULT * cfg.TP3_R
+            tp1, tp2, tp3 = tp1_atr, tp2_atr, tp3_atr
 
         pos = Position(side=side, avg_entry=entry, qty=qty, stop=stop,
                        tp1=tp1, tp2=tp2, tp3=tp3, initial_risk=risk,
