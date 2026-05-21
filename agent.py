@@ -61,7 +61,7 @@ def _load_positions(slot: int, symbol: str) -> list | None:
         if not os.path.exists(path):
             return None
         # Discard if the file is older than 24 h — positions that old are stale
-        age_hours = (time.time() - os.path.getmtime(path)) / 3600
+        age_hours = (_time.time() - os.path.getmtime(path)) / 3600
         if age_hours > 24:
             os.unlink(path)
             log("AGENT", "POS_RESTORE_SKIP", reason="stale_file",
@@ -403,8 +403,9 @@ async def main_loop():
             log("AGENT", "PRE_SWITCH_SELL_ERROR", symbol=symbol, error=str(_liq_e))
 
     log("AGENT", "READY", symbol=active_symbol, testnet=cfg.USE_TESTNET, equity=round(equity, 2))
-    _session_start_equity = equity          # baseline for lifetime session P&L
-    _session_start_ts     = _time.time()
+    _session_start_equity  = equity         # baseline for session P&L % only
+    _session_realized_pnl  = 0.0           # sum of all closed-trade P&L this session
+    _session_start_ts      = _time.time()
     update_state(equity=equity, symbol=active_symbol,
                  session_start_equity=round(_session_start_equity, 2),
                  session_start_ts=_session_start_ts,
@@ -783,7 +784,8 @@ async def main_loop():
 
             # ── Module 5: Manage open positions ───────────────────
             exit_actions = em.manage_open_positions(current_price, indicators)
-            for act in exit_actions:
+            for act, trade_pnl in exit_actions:
+                _session_realized_pnl += trade_pnl
                 push_log(f"[EXIT] {act} @ {current_price:.4f}")
                 if act.startswith("CLOSE:"):
                     # Full close — sell entire base asset balance on the exchange
@@ -996,7 +998,11 @@ async def main_loop():
             risk.update_metrics(equity)
             import portfolio_tracker as _pt
             _pf = _pt.get_portfolio_state()
-            _s_pnl     = equity - _session_start_equity
+            _unrealized_pnl = sum(
+                (current_price - p.avg_entry) * p.qty * (1 if p.side == "BUY" else -1)
+                for p in em.positions
+            )
+            _s_pnl     = _session_realized_pnl + _unrealized_pnl
             _s_pnl_pct = (_s_pnl / _session_start_equity * 100) if _session_start_equity else 0
             update_state(
                 equity=equity,

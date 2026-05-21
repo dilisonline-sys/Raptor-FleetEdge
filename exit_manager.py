@@ -78,8 +78,13 @@ class ExitManager:
             tp1=round(tp1, 2), tp2=round(tp2, 2), tp3=round(tp3, 2), risk_usdt=round(risk, 2))
         return pos
 
-    def manage_open_positions(self, current_price: float, ind: dict) -> list[str]:
-        actions = []
+    def manage_open_positions(self, current_price: float, ind: dict) -> list[tuple[str, float]]:
+        """
+        Returns list of (action_str, realized_pnl) tuples so callers can
+        accumulate per-agent session P&L without re-deriving trade values.
+        realized_pnl is 0.0 for non-closing actions (stop moves, etc.).
+        """
+        actions: list[tuple[str, float]] = []
         atr = ind["atr14"]
         for pos in list(self.positions):
             direction  = 1 if pos.side == "BUY" else -1
@@ -97,9 +102,10 @@ class ExitManager:
                        (pos.side == "SELL" and current_price >= pos.stop)
             if hit_stop:
                 log("MODULE_5", "STOP_HIT", side=pos.side, stop=pos.stop, price=current_price)
+                pnl = (current_price - pos.avg_entry) * pos.qty * direction
                 _push_tx(pos, current_price, "STOP_HIT")
                 self.positions.remove(pos)
-                actions.append(f"CLOSE:{pos.side}:STOP")
+                actions.append((f"CLOSE:{pos.side}:STOP", round(pnl, 4)))
                 continue
 
             # Break-even
@@ -122,38 +128,43 @@ class ExitManager:
                         pos.stop = trail
                         log("MODULE_5", "TRAIL_STOP_UPDATE", stop=round(pos.stop, 2))
 
-            # TP1
+            # TP1 — record P&L on the sold slice before reducing qty
             if not pos.tp1_hit:
                 hit = (pos.side == "BUY" and current_price >= pos.tp1) or \
                       (pos.side == "SELL" and current_price <= pos.tp1)
                 if hit:
-                    pos.qty     *= (1 - cfg.TP1_PCT)
-                    pos.tp1_hit  = True
+                    sold_qty    = pos.qty * cfg.TP1_PCT
+                    tp1_pnl     = (current_price - pos.avg_entry) * sold_qty * direction
+                    pos.qty    *= (1 - cfg.TP1_PCT)
+                    pos.tp1_hit = True
                     log("MODULE_5", "TP1_HIT", price=current_price, remaining_qty=round(pos.qty, 5))
-                    actions.append(f"PARTIAL_CLOSE:{pos.side}:TP1")
+                    actions.append((f"PARTIAL_CLOSE:{pos.side}:TP1", round(tp1_pnl, 4)))
 
-            # TP2
+            # TP2 — record P&L on the sold slice before reducing qty
             elif not pos.tp2_hit:
                 hit = (pos.side == "BUY" and current_price >= pos.tp2) or \
                       (pos.side == "SELL" and current_price <= pos.tp2)
                 if hit:
-                    pos.qty    *= (1 - cfg.TP2_PCT / (1 - cfg.TP1_PCT))
+                    frac        = cfg.TP2_PCT / (1 - cfg.TP1_PCT)
+                    sold_qty    = pos.qty * frac
+                    tp2_pnl     = (current_price - pos.avg_entry) * sold_qty * direction
+                    pos.qty    *= (1 - frac)
                     pos.tp2_hit = True
                     log("MODULE_5", "TP2_HIT", price=current_price, remaining_qty=round(pos.qty, 5))
-                    actions.append(f"PARTIAL_CLOSE:{pos.side}:TP2")
+                    actions.append((f"PARTIAL_CLOSE:{pos.side}:TP2", round(tp2_pnl, 4)))
 
-            # Time exit: exit if flat/losing after max_hours; extend if trade is winning.
-            # Winning trades get up to 2× the time limit — let profits run, cut deadweight.
+            # Time exit
             hours_held = (time.time() - pos.entry_ts) / 3600
             max_hours  = cfg.MAX_TRADE_HOURS_FUTURES
-            is_winning = r_multiple >= 0.5  # at least halfway to TP1
+            is_winning = r_multiple >= 0.5
             effective_max = max_hours * 2 if is_winning else max_hours
             if hours_held > effective_max:
                 log("MODULE_5", "TIME_EXIT_TRIGGERED", hours=round(hours_held, 1),
                     r=round(r_multiple, 2), winning=is_winning)
+                pnl = (current_price - pos.avg_entry) * pos.qty * direction
                 _push_tx(pos, current_price, "TIME_EXIT")
                 self.positions.remove(pos)
-                actions.append(f"CLOSE:{pos.side}:TIME")
+                actions.append((f"CLOSE:{pos.side}:TIME", round(pnl, 4)))
 
             # Signal-reversal exit
             rsi = ind.get("rsi14", 50)
@@ -161,8 +172,9 @@ class ExitManager:
             price_below_ema9 = current_price < ind.get("ema9", current_price)
             if pos.side == "BUY" and rsi > cfg.RSI_EXIT_LONG and macd_cross_down and price_below_ema9:
                 log("MODULE_5", "SIGNAL_REVERSAL_EXIT", side="BUY", rsi=rsi)
+                pnl = (current_price - pos.avg_entry) * pos.qty * direction
                 _push_tx(pos, current_price, "SIGNAL_REVERSAL")
                 self.positions.remove(pos)
-                actions.append("CLOSE:BUY:SIGNAL_REVERSAL")
+                actions.append(("CLOSE:BUY:SIGNAL_REVERSAL", round(pnl, 4)))
 
         return actions
