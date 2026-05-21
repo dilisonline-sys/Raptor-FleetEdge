@@ -180,6 +180,14 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
   <div class="card"><div class="lbl">Regime</div><div class="val y" id="c-reg">—</div></div>
   <div class="card"><div class="lbl">Open Positions</div><div class="val" id="c-pos">—</div></div>
   <div class="card"><div class="lbl">Daily Drawdown</div><div class="val" id="c-dd">—</div></div>
+  <div class="card" id="session-card">
+    <div class="lbl">SESSION P&amp;L</div>
+    <div style="margin-top:4px;display:flex;align-items:baseline;gap:6px">
+      <span id="session-pnl" style="font-size:1.3rem;font-weight:bold;font-family:'Courier New',monospace">—</span>
+      <span id="session-pnl-pct" style="font-size:.78rem"></span>
+    </div>
+    <div style="font-size:.68rem;color:#fff;margin-top:3px">Start: <span id="session-start-eq" style="color:#fff">—</span></div>
+  </div>
   <div class="card"><div class="lbl">Last Signal</div><div class="val" id="c-sig">—</div></div>
   <div class="card"><div class="lbl">Uptime</div><div class="val g" id="c-up">—</div></div>
   <div class="card"><div class="lbl">Fear &amp; Greed</div><div class="val" id="c-fg" style="font-size:1rem">—</div></div>
@@ -546,6 +554,22 @@ function renderCards(s) {
   const ddEl = document.getElementById('c-dd');
   ddEl.textContent = dd + '%';
   ddEl.className = 'val ' + (parseFloat(dd) > 3 ? 'r' : 'g');
+  // Session P&L
+  const spnl    = s.session_pnl    || 0;
+  const spnlPct = s.session_pnl_pct || 0;
+  const spnlEl    = document.getElementById('session-pnl');
+  const spnlPctEl = document.getElementById('session-pnl-pct');
+  if (spnlEl) {
+    const sign = spnl >= 0 ? '+' : '';
+    spnlEl.textContent  = sign + '$' + Math.abs(spnl).toFixed(2);
+    spnlEl.style.color  = spnl >= 0 ? '#00e676' : '#ff1744';
+    if (spnl < 0) spnlEl.textContent = '-$' + Math.abs(spnl).toFixed(2);
+    spnlPctEl.textContent = '(' + (spnlPct >= 0 ? '+' : '') + spnlPct.toFixed(2) + '%)';
+    spnlPctEl.style.color = spnlPct >= 0 ? '#00e676' : '#ff1744';
+  }
+  if (s.session_start_equity) {
+    document.getElementById('session-start-eq').textContent = '$' + s.session_start_equity.toFixed(2);
+  }
   setEl('c-sig', s.last_signal || '—');
   setEl('c-up',  `${h}h ${m}m`);
   setEl('c-interval', s.interval || '—');
