@@ -364,6 +364,8 @@ async def main_loop():
     _pool_pnl:           float      = 0.0   # cached daily pnl — reported to pool every cycle start
     _orphan_checked:     bool       = False  # one-shot: recover orphaned base-asset positions on restart
     _last_fill_time:     dict       = {}    # symbol → last fill timestamp (entry cooldown)
+    _ai_rotate_last:     float      = 0.0  # last AI-triggered rotation timestamp (cooldown)
+    AI_ROTATE_COOLDOWN   = 600             # 10 min between AI-driven rotations
     VOLATILE_ESCAPE_SECS   = 600           # 10 minutes
     GATE_FAIL_SWITCH_AFTER = 2            # switch coin after 2 straight gate fails (~2 min)
     NONE_SIGNAL_ROTATE     = 5            # rotate to next ranked coin after 5 NONE cycles (~5 min)
@@ -695,7 +697,7 @@ async def main_loop():
             push_log(f"[CYCLE] {active_symbol} | price={current_price:.4f} | regime={regime} "
                      f"| RSI={indicators['rsi14']:.1f} | EMA9={indicators['ema9']:.4f}")
 
-            # ── AI Analyst (advisory only — no trading impact) ────
+            # ── AI Analyst (advisory + coin rotation when confidence < 50%) ─
             if analyst.enabled:
                 _pos_info = None
                 if em.positions:
@@ -707,6 +709,38 @@ async def main_loop():
                     _run_analyst(analyst, active_symbol, current_price, indicators,
                                  candles, regime, fear_greed, _pos_info)
                 )
+                # Act on previous cycle's completed analysis — rotate if AI confidence < 50
+                _ai_last = analyst.last_analysis
+                _ai_conf = _ai_last.get("confidence", 100) if _ai_last else 100
+                _ai_rotate_flag = _ai_last.get("suggest_rotation", False) if _ai_last else False
+                _ai_for_sym = _ai_last.get("symbol", "") if _ai_last else ""
+                _now_ts = _time.time()
+                if (
+                    _ai_rotate_flag
+                    and _ai_for_sym == active_symbol
+                    and not em.positions
+                    and coin_mode == "auto"
+                    and _agent_slot != 0
+                    and _now_ts - _ai_rotate_last >= AI_ROTATE_COOLDOWN
+                ):
+                    push_log(f"[AI_ROTATE] Confidence={_ai_conf}% < 50 on {active_symbol} — switching coin")
+                    log("AGENT", "AI_ROTATION", symbol=active_symbol, confidence=_ai_conf)
+                    _ai_rotate_last = _now_ts
+                    analyst.last_analysis = {}  # clear so we don't re-trigger next cycle
+                    _pool_excl = _ep.get_other_symbols(_agent_slot)
+                    _pool_excl.add(active_symbol)
+                    new_symbol = await scanner.scan(exclude=_pool_excl, force=True)
+                    if new_symbol and new_symbol != active_symbol:
+                        await _liquidate_before_switch(active_symbol)
+                        await md.close()
+                        active_symbol = new_symbol
+                        md = MarketData(active_symbol, cfg.INTERVAL)
+                        await md.connect()
+                        _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
+                        update_state(symbol=active_symbol, coin_mode="auto")
+                        none_signal_streak = 0
+                        await _cycle_sleep()
+                        continue
 
             # ── RANGING: immediately rotate to the next best ranked coin ─────
             if regime == "RANGING" and not em.positions and _agent_slot != 0:

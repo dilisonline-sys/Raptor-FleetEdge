@@ -33,6 +33,7 @@ Given current market data, produce a concise JSON analysis with these exact fiel
   "resistance": <float — nearest key resistance price>,
   "entry_quality": "EXCELLENT" | "GOOD" | "POOR" | "AVOID",
   "risk_level": "LOW" | "MEDIUM" | "HIGH",
+  "suggest_rotation": <boolean — true when confidence < 50 and you would advise the agent to switch to a different coin>,
   "insight": "<2-3 sentence plain-English market read>",
   "watch": "<1 sentence — specific thing to monitor next candle>"
 }
@@ -40,6 +41,7 @@ Given current market data, produce a concise JSON analysis with these exact fiel
 Rules:
 - Base everything strictly on the data provided (no speculation beyond given indicators)
 - entry_quality refers to the quality of a LONG entry at current price
+- suggest_rotation must be true when confidence < 50 — the setup is too weak to justify staying on this coin
 - Be concise and precise — the insight must be actionable within the next 1-3 candles
 - Respond with JSON only, no other text
 """
