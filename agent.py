@@ -573,8 +573,6 @@ async def main_loop():
                 if new_symbol != active_symbol:
                     push_log(f"[SWITCH] {active_symbol} → {new_symbol} | top5={top5}")
                     log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol, top5=top5)
-                    asyncio.create_task(asyncio.to_thread(
-                        _email.notify_rotation, _agent_name, active_symbol, new_symbol, "scanner pick"))
                     await _liquidate_before_switch(active_symbol)
                     await md.close()
                     active_symbol = new_symbol
@@ -609,8 +607,6 @@ async def main_loop():
                         log("AGENT", "GATE_FAIL_SWITCH", symbol=active_symbol, streak=gate_fail_streak)
                         new_symbol = await scanner.scan(exclude={active_symbol}, force=True)
                         if new_symbol != active_symbol:
-                            asyncio.create_task(asyncio.to_thread(
-                                _email.notify_rotation, _agent_name, active_symbol, new_symbol, "quality gate escape"))
                             await _liquidate_before_switch(active_symbol)
                             await md.close()
                             active_symbol = new_symbol
@@ -729,8 +725,6 @@ async def main_loop():
                         push_log(f"[RANGING_ESCAPE] {active_symbol} is RANGING — rotating to {next_sym}")
                         log("AGENT", "RANGING_ESCAPE", from_=active_symbol, to=next_sym,
                             idx=_ranked_idx)
-                        asyncio.create_task(asyncio.to_thread(
-                            _email.notify_rotation, _agent_name, active_symbol, next_sym, "ranging escape"))
                         await _liquidate_before_switch(active_symbol)
                         await md.close()
                         active_symbol      = next_sym
@@ -767,8 +761,6 @@ async def main_loop():
                             push_log(f"[SWITCH] {active_symbol} → {new_symbol} (volatile escape)")
                             log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol,
                                 reason="volatile_escape")
-                            asyncio.create_task(asyncio.to_thread(
-                                _email.notify_rotation, _agent_name, active_symbol, new_symbol, "volatile escape"))
                             await _liquidate_before_switch(active_symbol)
                             await md.close()
                             active_symbol = new_symbol
@@ -871,8 +863,6 @@ async def main_loop():
                         push_log(f"[ROTATE] {active_symbol}: {_rotate_reason} — switching to {next_sym}")
                         log("AGENT", "SIGNAL_ROTATE", from_=active_symbol, to=next_sym,
                             streak=none_signal_streak, idx=_ranked_idx)
-                        asyncio.create_task(asyncio.to_thread(
-                            _email.notify_rotation, _agent_name, active_symbol, next_sym, _rotate_reason))
                         await _liquidate_before_switch(active_symbol)
                         await md.close()
                         active_symbol      = next_sym
