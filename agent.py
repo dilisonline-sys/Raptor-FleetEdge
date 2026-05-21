@@ -944,10 +944,25 @@ async def main_loop():
                 usdt_equiv, base_bal, raw_usdt = await om.get_balances_raw(active_symbol)
                 equity = usdt_equiv + base_bal * current_price  # full equity (includes BTC)
                 stop_d = indicators["atr14"] * cfg.ATR_STOP_MULT
-                tp1_dist = stop_d * cfg.TP1_R  # TP1 distance from entry
-                min_tp_dist = current_price * 0.0022  # 0.22% = round-trip fees (2×0.1%) + 0.02% margin
+                # Effective TP1 uses the same floor logic as exit_manager: max(h1_range, ATR)
+                _h1r         = indicators.get("h1_range", 0)
+                _tp1_atr_d   = stop_d * cfg.TP1_R
+                _tp1_h1_d    = _h1r * 0.40 if _h1r > 0 else 0
+                tp1_dist     = max(_tp1_atr_d, _tp1_h1_d)
+                min_tp_dist  = current_price * 0.0022  # 0.22% = round-trip fees (2×0.1%) + 0.02% margin
                 if tp1_dist < min_tp_dist:
                     push_log(f"[SKIP] {active_symbol} TP1 too close ({tp1_dist/current_price*100:.3f}%) — won't cover fees")
+                    signal = "NONE"
+                # Minimum R:R gate — reject entries where reward < 1.5× risk
+                MIN_ENTRY_RR = 1.5
+                pre_rr = tp1_dist / stop_d if stop_d else 0
+                if signal == "BUY" and pre_rr < MIN_ENTRY_RR:
+                    push_log(f"[SKIP] {active_symbol} R:R {pre_rr:.2f}x < {MIN_ENTRY_RR} minimum — skipping entry")
+                    signal = "NONE"
+                # Fear & Greed gate — no new longs when market is in Fear (< 35)
+                _fg_val = fear_greed.get("value", 50) if fear_greed else 50
+                if signal == "BUY" and _fg_val < 35:
+                    push_log(f"[SKIP] {active_symbol} Fear&Greed={_fg_val} (Fear) — no new longs, waiting for neutral market")
                     signal = "NONE"
                 # ATR cap: reject extremely volatile coins — the same volatility that scores them
                 # high will blow through stops on normal noise (FIDA: 4.1% ATR → stop hit -11%)
@@ -955,6 +970,12 @@ async def main_loop():
                 atr_pct_live = indicators["atr14"] / current_price * 100
                 if signal == "BUY" and atr_pct_live > MAX_ENTRY_ATR_PCT:
                     push_log(f"[SKIP] {active_symbol} ATR {atr_pct_live:.2f}% > {MAX_ENTRY_ATR_PCT}% cap — too volatile to enter safely")
+                    signal = "NONE"
+
+            if signal == "BUY" and not em.positions:
+                # Last-second pool check — another agent may have just entered this coin
+                if active_symbol in _ep.get_other_symbols(_agent_slot):
+                    push_log(f"[SKIP] {active_symbol} just claimed by another slot — skipping to avoid duplicate")
                     signal = "NONE"
 
             if signal == "BUY" and not em.positions:
