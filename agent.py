@@ -31,6 +31,7 @@ import config as cfg
 import email_notifier as _email
 import equity_pool as _ep
 from ai_analyst import AIAnalyst
+from ai_coin_selector import AICoinSelector
 
 
 # ── Position persistence ──────────────────────────────────────────────────
@@ -192,6 +193,7 @@ async def main_loop():
     rc       = RegimeClassifier()
     fg       = FearGreedClient()
     analyst  = AIAnalyst()
+    selector  = AICoinSelector()
     queue       = asyncio.Queue()
     _agent_slot = int(os.environ.get("AGENT_SLOT", "0"))
     _agent_name = os.environ.get("AGENT_NAME", f"dipu-slot{_agent_slot}")
@@ -354,6 +356,38 @@ async def main_loop():
 
     asyncio.create_task(_background_scanner())
 
+    async def _ai_selector_task():
+        """Background task: every 15 min ask AI which coins are best for momentum trades."""
+        # Stagger per slot so they don't all hit Anthropic simultaneously
+        await asyncio.sleep(30 + _agent_slot * 90)
+        while True:
+            try:
+                if _agent_slot != 0 and scanner.ranked:
+                    candidates = [
+                        {
+                            "symbol":     r["symbol"],
+                            "deep_score": r.get("deep_score", 0),
+                            "atr_pct":    r.get("atr_pct", 0),
+                            "chg_pct":    r.get("chg_pct", 0),
+                            "vol_m":      r.get("vol", 0) / 1_000_000,
+                            "regime":     r.get("regime", "?"),
+                            "trend":      r.get("trend", "?"),
+                        }
+                        for r in scanner.ranked[:8]
+                    ]
+                    result = await selector.select(candidates)
+                    if result:
+                        recs = result.get("recommendations", [])
+                        update_state(ai_coin_picks=[r["symbol"] for r in recs])
+                        push_log(f"[AI_SELECT] Market: {result.get('market_comment','')} | Top picks: {[r['symbol'] for r in recs[:3]]}")
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                log("AI_SELECTOR", "TASK_ERROR", error=str(e)[:80])
+            await asyncio.sleep(900)  # re-run every 15 min
+
+    asyncio.create_task(_ai_selector_task())
+
     pending_override:    str | None = None
     pending_force_coin:  str | None = None  # force-switch target (closes position first)
     volatile_since:      float      = 0.0   # when current coin first entered VOLATILE
@@ -364,8 +398,6 @@ async def main_loop():
     _pool_pnl:           float      = 0.0   # cached daily pnl — reported to pool every cycle start
     _orphan_checked:     bool       = False  # one-shot: recover orphaned base-asset positions on restart
     _last_fill_time:     dict       = {}    # symbol → last fill timestamp (entry cooldown)
-    _ai_rotate_last:     float      = 0.0  # last AI-triggered rotation timestamp (cooldown)
-    AI_ROTATE_COOLDOWN   = 600             # 10 min between AI-driven rotations
     VOLATILE_ESCAPE_SECS   = 600           # 10 minutes
     GATE_FAIL_SWITCH_AFTER = 2            # switch coin after 2 straight gate fails (~2 min)
     NONE_SIGNAL_ROTATE     = 5            # rotate to next ranked coin after 5 NONE cycles (~5 min)
@@ -408,7 +440,6 @@ async def main_loop():
     _session_start_equity  = equity         # baseline for session P&L % only
     _session_realized_pnl  = 0.0           # sum of all closed-trade P&L this session
     _session_start_ts      = _time.time()
-    _ai_auto_active        = False          # True when AI was auto-activated by P&L monitor
     update_state(equity=equity, symbol=active_symbol,
                  session_start_equity=round(_session_start_equity, 2),
                  session_start_ts=_session_start_ts,
@@ -576,7 +607,20 @@ async def main_loop():
             coin_mode = _state.get("coin_mode", "auto")
             if not em.positions and coin_mode == "auto" and _agent_slot != 0:
                 _ep_excl = _ep.get_other_symbols(_agent_slot)
-                new_symbol = await scanner.scan(exclude=_ep_excl if _ep_excl else None)
+                # AI coin selection takes priority over scanner when recommendations are fresh
+                _ai_sel   = selector.last_result
+                _ai_recs  = _ai_sel.get("recommendations", []) if _ai_sel else []
+                new_symbol = None
+                if _ai_recs:
+                    for _rec in _ai_recs:
+                        if _rec["symbol"] not in _ep_excl and _rec.get("confidence", 0) >= 60:
+                            new_symbol = _rec["symbol"]
+                            if new_symbol != active_symbol:
+                                push_log(f"[AI_SELECT] Assigned {new_symbol} (confidence={_rec['confidence']}%): {_rec.get('reason','')}")
+                            break
+                if not new_symbol:
+                    # Fallback: scanner-driven selection (AI unavailable or no confident picks)
+                    new_symbol = await scanner.scan(exclude=_ep_excl if _ep_excl else None)
                 top5 = [r["symbol"] for r in scanner.ranked[:5]]
                 update_state(top_coins=top5)
                 if new_symbol != active_symbol:
@@ -697,7 +741,7 @@ async def main_loop():
             push_log(f"[CYCLE] {active_symbol} | price={current_price:.4f} | regime={regime} "
                      f"| RSI={indicators['rsi14']:.1f} | EMA9={indicators['ema9']:.4f}")
 
-            # ── AI Analyst (advisory + coin rotation when confidence < 50%) ─
+            # ── AI Analyst (advisory) ─────────────────────────────────────────
             if analyst.enabled:
                 _pos_info = None
                 if em.positions:
@@ -709,44 +753,6 @@ async def main_loop():
                     _run_analyst(analyst, active_symbol, current_price, indicators,
                                  candles, regime, fear_greed, _pos_info)
                 )
-                # Act on previous cycle's completed analysis — rotate if AI confidence < 50
-                # Guard: only rotate if scanner has a coin that scores meaningfully better,
-                # preventing endless spinning when the whole market is low-confidence.
-                _ai_last = analyst.last_analysis
-                _ai_conf = _ai_last.get("confidence", 100) if _ai_last else 100
-                _ai_rotate_flag = _ai_last.get("suggest_rotation", False) if _ai_last else False
-                _ai_for_sym = _ai_last.get("symbol", "") if _ai_last else ""
-                _now_ts = _time.time()
-                # Find if there's a scanner-ranked coin better than current
-                _pool_excl = _ep.get_other_symbols(_agent_slot)
-                _cur_rank = next((r for r in scanner.ranked if r["symbol"] == active_symbol), None)
-                _best_rank = next((r for r in scanner.ranked if r["symbol"] not in _pool_excl and r["symbol"] != active_symbol), None)
-                _has_better = (_best_rank and _cur_rank and
-                               _best_rank.get("deep_score", 0) > _cur_rank.get("deep_score", 0) * 1.2)
-                if (
-                    _ai_rotate_flag
-                    and _ai_for_sym == active_symbol
-                    and not em.positions
-                    and coin_mode == "auto"
-                    and _agent_slot != 0
-                    and _now_ts - _ai_rotate_last >= AI_ROTATE_COOLDOWN
-                    and _has_better
-                ):
-                    push_log(f"[AI_ROTATE] Confidence={_ai_conf}% on {active_symbol} — better option {_best_rank['symbol']} available, switching")
-                    log("AGENT", "AI_ROTATION", symbol=active_symbol, confidence=_ai_conf, to=_best_rank["symbol"])
-                    _ai_rotate_last = _now_ts
-                    analyst.last_analysis = {}  # clear so we don't re-trigger next cycle
-                    new_symbol = _best_rank["symbol"]
-                    await _liquidate_before_switch(active_symbol)
-                    await md.close()
-                    active_symbol = new_symbol
-                    md = MarketData(active_symbol, cfg.INTERVAL)
-                    await md.connect()
-                    _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
-                    update_state(symbol=active_symbol, coin_mode="auto")
-                    none_signal_streak = 0
-                    await _cycle_sleep()
-                    continue
 
             # ── RANGING: immediately rotate to the next best ranked coin ─────
             if regime == "RANGING" and not em.positions and _agent_slot != 0:
@@ -1076,22 +1082,6 @@ async def main_loop():
                 session_pnl_pct=round(_s_pnl_pct, 2),
                 session_start_equity=round(_session_start_equity, 2),
             )
-
-            # ── AI auto-assist: activate when session P&L ≤ 0, stop at +0.1% ─
-            # Slot 0 (BTC-locked) is excluded — AI disabled for BTC by design
-            _ai_recover_threshold = _session_start_equity * 0.001  # 0.1%
-            if _agent_slot != 0 and _s_pnl <= 0 and not analyst.enabled:
-                analyst.toggle(True)
-                _ai_auto_active = True
-                update_state(ai_analyst_enabled=True, ai_analysis={})
-                push_log(f"[AI_AUTO] Session P&L {_s_pnl:+.4f} ≤ 0 — AI analyst activated to assist recovery")
-                log("AGENT", "AI_AUTO_ON", session_pnl=round(_s_pnl, 4))
-            elif _ai_auto_active and _s_pnl >= _ai_recover_threshold and analyst.enabled:
-                analyst.toggle(False)
-                _ai_auto_active = False
-                update_state(ai_analyst_enabled=False)
-                push_log(f"[AI_AUTO] Session P&L {_s_pnl:+.4f} ≥ +0.1% target — AI analyst deactivated")
-                log("AGENT", "AI_AUTO_OFF", session_pnl=round(_s_pnl, 4), threshold=round(_ai_recover_threshold, 4))
 
             # ── Position heartbeat (displayed every cycle in live log) ────
             if em.positions:
