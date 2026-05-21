@@ -1072,8 +1072,9 @@ async def main_loop():
             )
 
             # ── AI auto-assist: activate when session P&L ≤ 0, stop at +0.1% ─
+            # Slot 0 (BTC-locked) is excluded — AI disabled for BTC by design
             _ai_recover_threshold = _session_start_equity * 0.001  # 0.1%
-            if _s_pnl <= 0 and not analyst.enabled:
+            if _agent_slot != 0 and _s_pnl <= 0 and not analyst.enabled:
                 analyst.toggle(True)
                 _ai_auto_active = True
                 update_state(ai_analyst_enabled=True, ai_analysis={})
