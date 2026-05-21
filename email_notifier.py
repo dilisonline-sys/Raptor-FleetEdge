@@ -50,12 +50,13 @@ def _ts() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
 
-def _send(subject: str, body_html: str) -> bool:
+def _send(subject: str, body_html: str) -> tuple[bool, str]:
+    """Send an email. Returns (True, '') on success or (False, reason) on failure."""
     cfg = load_config()
     if not cfg.get("enabled"):
-        return False
+        return False, "notifications disabled"
     if not cfg.get("recipient") or not cfg.get("smtp_user") or not cfg.get("smtp_password"):
-        return False
+        return False, "incomplete SMTP config — recipient, smtp_user, or smtp_password missing"
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -76,10 +77,25 @@ def _send(subject: str, body_html: str) -> bool:
                 s.starttls(context=ctx)
                 s.login(cfg["smtp_user"], cfg["smtp_password"])
                 s.sendmail(cfg["smtp_user"], cfg["recipient"], msg.as_string())
-        return True
+        return True, ""
+    except smtplib.SMTPAuthenticationError:
+        reason = "authentication failed — check App Password"
+        print(f"[email] send failed: {reason}")
+        return False, reason
+    except smtplib.SMTPRecipientsRefused as e:
+        reason = f"recipient refused: {e}"
+        print(f"[email] send failed: {reason}")
+        return False, reason
+    except smtplib.SMTPResponseException as e:
+        # Surface the full SMTP server message (e.g. daily limit exceeded)
+        reason = e.smtp_error.decode() if isinstance(e.smtp_error, bytes) else str(e.smtp_error)
+        reason = reason.replace("\n", " ").strip()
+        print(f"[email] send failed: {reason}")
+        return False, reason
     except Exception as e:
-        print(f"[email] send failed: {e}")
-        return False
+        reason = str(e)
+        print(f"[email] send failed: {reason}")
+        return False, reason
 
 
 def _style_wrap(inner: str) -> str:
@@ -105,7 +121,8 @@ def notify_rotation(agent_name: str, from_sym: str, to_sym: str, reason: str) ->
         {_row("Reason", reason)}
         {_row("Time",   _ts(), "#777")}
       </table>""")
-    return _send(f"[dipu] {agent_name}: rotated {from_sym} → {to_sym}", html)
+    ok, _ = _send(f"[dipu] {agent_name}: rotated {from_sym} → {to_sym}", html)
+    return ok
 
 
 def notify_fill(agent_name: str, symbol: str, side: str, qty: float, price: float) -> bool:
@@ -125,7 +142,8 @@ def notify_fill(agent_name: str, symbol: str, side: str, qty: float, price: floa
         {_row("Value",  f"${value:.2f}")}
         {_row("Time",   _ts(), "#777")}
       </table>""")
-    return _send(f"[dipu] {agent_name}: {side} {symbol} {qty:.4f} @ ${price:.5f}", html)
+    ok, _ = _send(f"[dipu] {agent_name}: {side} {symbol} {qty:.4f} @ ${price:.5f}", html)
+    return ok
 
 
 def notify_coin_traded(agent_name: str, symbol: str, regime: str, signal: str) -> bool:
@@ -142,7 +160,8 @@ def notify_coin_traded(agent_name: str, symbol: str, regime: str, signal: str) -
         {_row("Signal", signal)}
         {_row("Time",   _ts(), "#777")}
       </table>""")
-    return _send(f"[dipu] {agent_name}: now trading {symbol} ({regime})", html)
+    ok, _ = _send(f"[dipu] {agent_name}: now trading {symbol} ({regime})", html)
+    return ok
 
 
 def send_pnl_report(slots_data: dict) -> bool:
@@ -187,10 +206,12 @@ def send_pnl_report(slots_data: dict) -> bool:
         <span style="color:#fff">Total Daily P&amp;L:&nbsp;</span>
         <span style="color:{total_color};font-size:1.15em;font-weight:bold">{total_str}</span>
       </div>""")
-    return _send(f"[dipu] 4h P&L Report — Total: {total_str}", html)
+    ok, _ = _send(f"[dipu] 4h P&L Report — Total: {total_str}", html)
+    return ok
 
 
-def send_test_email(recipient: str) -> bool:
+def send_test_email(recipient: str) -> tuple[bool, str]:
+    """Returns (True, '') on success or (False, reason) on failure."""
     html = _style_wrap(f"""
       <h2 style="color:#00e5ff;margin:0 0 14px">&#x2705; dipu email test</h2>
       <p style="color:#fff;margin:0 0 12px">Email notifications are working correctly.</p>
@@ -199,7 +220,7 @@ def send_test_email(recipient: str) -> bool:
     original = cfg.get("recipient", "")
     cfg["recipient"] = recipient
     save_config(cfg)
-    result = _send("[dipu] Test email — notifications active", html)
+    ok, reason = _send("[dipu] Test email — notifications active", html)
     cfg["recipient"] = original
     save_config(cfg)
-    return result
+    return ok, reason

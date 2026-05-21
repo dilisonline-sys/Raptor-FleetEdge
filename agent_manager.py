@@ -959,9 +959,9 @@ class AgentManager:
             if not recipient:
                 return web.json_response({"error": "recipient required"}, status=400)
             import email_notifier as _em
-            loop   = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, _em.send_test_email, recipient)
-            return web.json_response({"ok": result, "error": None if result else "send failed — check SMTP credentials"})
+            loop        = asyncio.get_event_loop()
+            ok, reason  = await loop.run_in_executor(None, _em.send_test_email, recipient)
+            return web.json_response({"ok": ok, "error": None if ok else reason})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 

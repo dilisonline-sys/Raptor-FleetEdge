@@ -582,7 +582,10 @@ def send_monitor_email(result: dict) -> bool:
             subject = f"[dipu] Health OK — {result['ts']}"
         else:
             subject = f"[dipu] ⚠ {len(result['issues'])} issue(s) detected — {result['ts']}"
-        return _em._send(subject, html)
+        ok, reason = _em._send(subject, html)
+        if not ok:
+            print(f"[monitor] email failed: {reason}")
+        return ok
     except Exception as e:
         print(f"[monitor] email failed: {e}")
         return False
