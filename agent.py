@@ -410,6 +410,7 @@ async def main_loop():
     _session_realized_pnl  = 0.0           # sum of all closed-trade P&L this session
     _session_start_ts      = _time.time()
     _ai_sel_triggered      = False          # one-shot: fired when session P&L ≤ 0, resets on recovery
+    _ai_sel_pending_ts     = 0.0           # stagger: slot N waits N×20s before firing
     update_state(equity=equity, symbol=active_symbol,
                  session_start_equity=round(_session_start_equity, 2),
                  session_start_ts=_session_start_ts,
@@ -920,11 +921,21 @@ async def main_loop():
             # ── AI coin selection trigger: fires once when session P&L ≤ 0 ─
             # Resets when P&L recovers above 0 so it can fire again on the next drawdown.
             if _s_pnl > 0:
-                _ai_sel_triggered = False  # reset — ready to fire again if P&L drops
+                _ai_sel_triggered  = False  # reset — ready to fire again if P&L drops
+                _ai_sel_pending_ts = 0.0
             elif not _ai_sel_triggered and not em.positions and _agent_slot != 0 and coin_mode == "auto":
-                _ai_sel_triggered = True
-                push_log(f"[AI_SELECT] Session P&L {_s_pnl:+.4f} ≤ 0 — asking AI for best coin")
-                log("AGENT", "AI_SELECT_TRIGGERED", session_pnl=round(_s_pnl, 4), symbol=active_symbol)
+                # Stagger by slot so each agent fires after the previous one has registered
+                # its coin in the equity pool: slot1=20s, slot2=40s, slot3=60s
+                if _ai_sel_pending_ts == 0.0:
+                    _ai_sel_pending_ts = _time.time() + _agent_slot * 20
+                    push_log(f"[AI_SELECT] P&L {_s_pnl:+.4f} ≤ 0 — selection queued in {_agent_slot * 20}s")
+                elif _time.time() < _ai_sel_pending_ts:
+                    pass  # still waiting for stagger delay
+                else:
+                    _ai_sel_triggered  = True
+                    _ai_sel_pending_ts = 0.0
+                    push_log(f"[AI_SELECT] Firing — asking AI for best coin (slot {_agent_slot})")
+                    log("AGENT", "AI_SELECT_TRIGGERED", session_pnl=round(_s_pnl, 4), symbol=active_symbol)
                 if scanner.ranked:
                     _sel_candidates = [
                         {
