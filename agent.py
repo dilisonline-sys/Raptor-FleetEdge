@@ -356,37 +356,6 @@ async def main_loop():
 
     asyncio.create_task(_background_scanner())
 
-    async def _ai_selector_task():
-        """Background task: every 15 min ask AI which coins are best for momentum trades."""
-        # Stagger per slot so they don't all hit Anthropic simultaneously
-        await asyncio.sleep(30 + _agent_slot * 90)
-        while True:
-            try:
-                if _agent_slot != 0 and scanner.ranked:
-                    candidates = [
-                        {
-                            "symbol":     r["symbol"],
-                            "deep_score": r.get("deep_score", 0),
-                            "atr_pct":    r.get("atr_pct", 0),
-                            "chg_pct":    r.get("chg_pct", 0),
-                            "vol_m":      r.get("vol", 0) / 1_000_000,
-                            "regime":     r.get("regime", "?"),
-                            "trend":      r.get("trend", "?"),
-                        }
-                        for r in scanner.ranked[:8]
-                    ]
-                    result = await selector.select(candidates)
-                    if result:
-                        recs = result.get("recommendations", [])
-                        update_state(ai_coin_picks=[r["symbol"] for r in recs])
-                        push_log(f"[AI_SELECT] Market: {result.get('market_comment','')} | Top picks: {[r['symbol'] for r in recs[:3]]}")
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                log("AI_SELECTOR", "TASK_ERROR", error=str(e)[:80])
-            await asyncio.sleep(900)  # re-run every 15 min
-
-    asyncio.create_task(_ai_selector_task())
 
     pending_override:    str | None = None
     pending_force_coin:  str | None = None  # force-switch target (closes position first)
@@ -440,6 +409,7 @@ async def main_loop():
     _session_start_equity  = equity         # baseline for session P&L % only
     _session_realized_pnl  = 0.0           # sum of all closed-trade P&L this session
     _session_start_ts      = _time.time()
+    _ai_sel_triggered      = False          # one-shot: fired when session P&L ≤ 0, resets on recovery
     update_state(equity=equity, symbol=active_symbol,
                  session_start_equity=round(_session_start_equity, 2),
                  session_start_ts=_session_start_ts,
@@ -607,20 +577,7 @@ async def main_loop():
             coin_mode = _state.get("coin_mode", "auto")
             if not em.positions and coin_mode == "auto" and _agent_slot != 0:
                 _ep_excl = _ep.get_other_symbols(_agent_slot)
-                # AI coin selection takes priority over scanner when recommendations are fresh
-                _ai_sel   = selector.last_result
-                _ai_recs  = _ai_sel.get("recommendations", []) if _ai_sel else []
-                new_symbol = None
-                if _ai_recs:
-                    for _rec in _ai_recs:
-                        if _rec["symbol"] not in _ep_excl and _rec.get("confidence", 0) >= 60:
-                            new_symbol = _rec["symbol"]
-                            if new_symbol != active_symbol:
-                                push_log(f"[AI_SELECT] Assigned {new_symbol} (confidence={_rec['confidence']}%): {_rec.get('reason','')}")
-                            break
-                if not new_symbol:
-                    # Fallback: scanner-driven selection (AI unavailable or no confident picks)
-                    new_symbol = await scanner.scan(exclude=_ep_excl if _ep_excl else None)
+                new_symbol = await scanner.scan(exclude=_ep_excl if _ep_excl else None)
                 top5 = [r["symbol"] for r in scanner.ranked[:5]]
                 update_state(top_coins=top5)
                 if new_symbol != active_symbol:
@@ -1082,6 +1039,54 @@ async def main_loop():
                 session_pnl_pct=round(_s_pnl_pct, 2),
                 session_start_equity=round(_session_start_equity, 2),
             )
+
+            # ── AI coin selection trigger: fires once when session P&L ≤ 0 ─
+            # Resets when P&L recovers above 0 so it can fire again on the next drawdown.
+            if _s_pnl > 0:
+                _ai_sel_triggered = False  # reset — ready to fire again if P&L drops
+            elif not _ai_sel_triggered and not em.positions and _agent_slot != 0 and coin_mode == "auto":
+                _ai_sel_triggered = True
+                push_log(f"[AI_SELECT] Session P&L {_s_pnl:+.4f} ≤ 0 — asking AI for best coin")
+                log("AGENT", "AI_SELECT_TRIGGERED", session_pnl=round(_s_pnl, 4), symbol=active_symbol)
+                if scanner.ranked:
+                    _sel_candidates = [
+                        {
+                            "symbol":     r["symbol"],
+                            "deep_score": r.get("deep_score", 0),
+                            "atr_pct":    r.get("atr_pct", 0),
+                            "chg_pct":    r.get("chg_pct", 0),
+                            "vol_m":      r.get("vol", 0) / 1_000_000,
+                            "regime":     r.get("regime", "?"),
+                            "trend":      r.get("trend", "?"),
+                        }
+                        for r in scanner.ranked[:8]
+                    ]
+                    try:
+                        _sel_result = await selector.select(_sel_candidates, interval_secs=0)
+                        if _sel_result and _sel_result.get("recommendations"):
+                            _pool_excl = _ep.get_other_symbols(_agent_slot)
+                            for _rec in _sel_result["recommendations"]:
+                                if _rec["symbol"] not in _pool_excl and _rec.get("confidence", 0) >= 60:
+                                    _sel_sym = _rec["symbol"]
+                                    push_log(f"[AI_SELECT] → {_sel_sym} (confidence={_rec['confidence']}%): {_rec.get('reason','')}")
+                                    log("AGENT", "AI_SELECT_ASSIGN", symbol=_sel_sym, confidence=_rec["confidence"])
+                                    if _sel_sym != active_symbol:
+                                        await _liquidate_before_switch(active_symbol)
+                                        await md.close()
+                                        active_symbol = _sel_sym
+                                        md = MarketData(active_symbol, cfg.INTERVAL)
+                                        await md.connect()
+                                        _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
+                                        update_state(symbol=active_symbol)
+                                        none_signal_streak = 0
+                                    selector.last_result = {}  # clear after use
+                                    break
+                            else:
+                                push_log(f"[AI_SELECT] No confident picks — staying on {active_symbol}")
+                        else:
+                            push_log(f"[AI_SELECT] AI unavailable — scanner continues as normal")
+                    except Exception as _sel_e:
+                        log("AI_SELECTOR", "TRIGGER_ERROR", error=str(_sel_e)[:80])
 
             # ── Position heartbeat (displayed every cycle in live log) ────
             if em.positions:
