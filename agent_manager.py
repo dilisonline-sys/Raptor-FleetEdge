@@ -346,7 +346,6 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
   </div>
   <div class="email-row" style="margin-top:12px">
     <span style="color:#fff;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;margin-right:16px">Notify on:</span>
-    <label class="chk-label"><input type="checkbox" id="chk-rotation"  checked> Coin rotation</label>
     <label class="chk-label"><input type="checkbox" id="chk-fills"     checked> Order fills</label>
     <label class="chk-label"><input type="checkbox" id="chk-coin"      checked> Coin traded (on change)</label>
     <label class="chk-label"><input type="checkbox" id="chk-pnl"       checked> 4h P&amp;L report</label>
@@ -614,7 +613,6 @@ async function loadEmailConfig() {
     document.getElementById('em-pass').value      = d.smtp_password ? '••••••••' : '';
     document.getElementById('em-enabled').checked = !!d.enabled;
     const n = d.notifications || {};
-    document.getElementById('chk-rotation').checked = n.coin_rotation !== false;
     document.getElementById('chk-fills').checked    = n.order_fills   !== false;
     document.getElementById('chk-coin').checked     = n.coin_traded   !== false;
     document.getElementById('chk-pnl').checked      = n.pnl_report    !== false;
@@ -630,7 +628,6 @@ async function saveEmailConfig() {
     smtp_password: passVal === '••••••••' ? null : passVal,
     enabled:       document.getElementById('em-enabled').checked,
     notifications: {
-      coin_rotation: document.getElementById('chk-rotation').checked,
       order_fills:   document.getElementById('chk-fills').checked,
       coin_traded:   document.getElementById('chk-coin').checked,
       pnl_report:    document.getElementById('chk-pnl').checked,
@@ -920,7 +917,7 @@ class AgentManager:
             pass
         return {"enabled": False, "recipient": "", "smtp_host": "smtp.gmail.com",
                 "smtp_port": 465, "smtp_user": "", "smtp_password": "",
-                "notifications": {"coin_rotation": True, "order_fills": True,
+                "notifications": {"order_fills": True,
                                    "coin_traded": True, "pnl_report": True}}
 
     def _save_email_cfg(self, cfg: dict) -> None:

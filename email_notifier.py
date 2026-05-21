@@ -17,7 +17,6 @@ _DEFAULT_CONFIG: dict = {
     "smtp_user": "",
     "smtp_password": "",
     "notifications": {
-        "coin_rotation": True,
         "order_fills":   True,
         "pnl_report":    True,
         "coin_traded":   True,
@@ -106,23 +105,6 @@ padding:24px;border-radius:10px;max-width:560px;margin:0 auto">{inner}</div>"""
 def _row(label: str, value: str, color: str = "#fff") -> str:
     return (f'<tr><td style="padding:5px 14px 5px 0;color:#fff">{label}</td>'
             f'<td style="padding:5px 0;color:{color};font-weight:bold">{value}</td></tr>')
-
-
-def notify_rotation(agent_name: str, from_sym: str, to_sym: str, reason: str) -> bool:
-    cfg = load_config()
-    if not cfg.get("notifications", {}).get("coin_rotation"):
-        return False
-    html = _style_wrap(f"""
-      <h2 style="color:#00e5ff;margin:0 0 14px">&#x1F504; Coin Rotation</h2>
-      <table style="border-collapse:collapse">
-        {_row("Agent",  agent_name)}
-        {_row("From",   from_sym,  "#ff6b6b")}
-        {_row("To",     to_sym,    "#00e676")}
-        {_row("Reason", reason)}
-        {_row("Time",   _ts(), "#777")}
-      </table>""")
-    ok, _ = _send(f"[dipu] {agent_name}: rotated {from_sym} → {to_sym}", html)
-    return ok
 
 
 def notify_fill(agent_name: str, symbol: str, side: str, qty: float, price: float) -> bool:
