@@ -921,22 +921,26 @@ async def main_loop():
             # ── AI coin selection trigger: fires once when session P&L ≤ 0 ─
             # Resets when P&L recovers above 0 so it can fire again on the next drawdown.
             if _s_pnl > 0:
-                _ai_sel_triggered  = False  # reset — ready to fire again if P&L drops
+                _ai_sel_triggered  = False
                 _ai_sel_pending_ts = 0.0
             elif not _ai_sel_triggered and not em.positions and _agent_slot != 0 and coin_mode == "auto":
-                # Stagger by slot so each agent fires after the previous one has registered
-                # its coin in the equity pool: slot1=20s, slot2=40s, slot3=60s
+                # Stagger: slot1=20s, slot2=40s, slot3=60s — ensures earlier slots register
+                # their coins in the equity pool before later slots query it
                 if _ai_sel_pending_ts == 0.0:
                     _ai_sel_pending_ts = _time.time() + _agent_slot * 20
-                    push_log(f"[AI_SELECT] P&L {_s_pnl:+.4f} ≤ 0 — selection queued in {_agent_slot * 20}s")
+                    push_log(f"[AI_SELECT] P&L {_s_pnl:+.4f} ≤ 0 — selection fires in {_agent_slot * 20}s")
                 elif _time.time() < _ai_sel_pending_ts:
-                    pass  # still waiting for stagger delay
+                    pass  # still in stagger window
                 else:
+                    # Stagger elapsed — fire now
                     _ai_sel_triggered  = True
                     _ai_sel_pending_ts = 0.0
-                    push_log(f"[AI_SELECT] Firing — asking AI for best coin (slot {_agent_slot})")
-                    log("AGENT", "AI_SELECT_TRIGGERED", session_pnl=round(_s_pnl, 4), symbol=active_symbol)
-                if scanner.ranked:
+                    log("AGENT", "AI_SELECT_TRIGGERED", session_pnl=round(_s_pnl, 4))
+
+                    # Build exclusion set: all coins in use by other slots + BTCUSDT (slot 0 locked)
+                    _hard_excl = _ep.get_other_symbols(_agent_slot) | {"BTCUSDT"}
+
+                    # Build candidate list, stripping already-taken and BTC coins before AI sees them
                     _sel_candidates = [
                         {
                             "symbol":     r["symbol"],
@@ -947,23 +951,28 @@ async def main_loop():
                             "regime":     r.get("regime", "?"),
                             "trend":      r.get("trend", "?"),
                         }
-                        for r in scanner.ranked[:8]
-                    ]
-                    try:
-                        _sel_result = await selector.select(
-                            _sel_candidates, fear_greed=fear_greed, interval_secs=0
-                        )
-                        if _sel_result:
-                            # Only act on coins the AI confirmed as profitable
-                            _profitable_recs = [
-                                r for r in _sel_result.get("recommendations", [])
-                                if r.get("profitable") and r.get("confidence", 0) >= 65
-                            ]
-                            push_log(f"[AI_SELECT] Market: {_sel_result.get('market_comment','')} | Profitable picks: {[r['symbol'] for r in _profitable_recs]}")
-                            _pool_excl = _ep.get_other_symbols(_agent_slot)
-                            _assigned  = False
-                            for _rec in _profitable_recs:
-                                if _rec["symbol"] not in _pool_excl:
+                        for r in scanner.ranked[:12]
+                        if r["symbol"] not in _hard_excl
+                    ] if scanner.ranked else []
+
+                    push_log(f"[AI_SELECT] Firing for slot {_agent_slot} | excluded={sorted(_hard_excl)} | candidates={[c['symbol'] for c in _sel_candidates[:5]]}")
+
+                    if not _sel_candidates:
+                        push_log(f"[AI_SELECT] No candidates after exclusion — holding {active_symbol}")
+                    else:
+                        try:
+                            _sel_result = await selector.select(
+                                _sel_candidates, fear_greed=fear_greed, interval_secs=0
+                            )
+                            if _sel_result:
+                                _profitable_recs = [
+                                    r for r in _sel_result.get("recommendations", [])
+                                    if r.get("profitable") and r.get("confidence", 0) >= 65
+                                    and r["symbol"] not in _hard_excl  # double-check after AI response
+                                ]
+                                push_log(f"[AI_SELECT] Market: {_sel_result.get('market_comment','')} | Profitable: {[r['symbol'] for r in _profitable_recs]}")
+                                _assigned = False
+                                for _rec in _profitable_recs:
                                     _sel_sym = _rec["symbol"]
                                     push_log(f"[AI_SELECT] → {_sel_sym} conf={_rec['confidence']}% est_rr={_rec.get('est_rr','?')}x | {_rec.get('reason','')}")
                                     log("AGENT", "AI_SELECT_ASSIGN", symbol=_sel_sym,
@@ -980,13 +989,12 @@ async def main_loop():
                                     selector.last_result = {}
                                     _assigned = True
                                     break
-                            if not _assigned:
-                                avoided = _sel_result.get("avoided", [])
-                                push_log(f"[AI_SELECT] No profitable coin found — avoided: {avoided} | scanner continues")
-                        else:
-                            push_log(f"[AI_SELECT] AI unavailable — scanner continues as normal")
-                    except Exception as _sel_e:
-                        log("AI_SELECTOR", "TRIGGER_ERROR", error=str(_sel_e)[:80])
+                                if not _assigned:
+                                    push_log(f"[AI_SELECT] No profitable pick after exclusion — holding {active_symbol}")
+                            else:
+                                push_log(f"[AI_SELECT] AI unavailable — holding {active_symbol}")
+                        except Exception as _sel_e:
+                            log("AI_SELECTOR", "TRIGGER_ERROR", error=str(_sel_e)[:80])
 
             # ── Position heartbeat (displayed every cycle in live log) ────
             if em.positions:
