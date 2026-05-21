@@ -573,27 +573,15 @@ async def main_loop():
                 await _cycle_sleep()
                 continue
 
-            # ── Dynamic symbol selection (no open position, auto mode only) ──
+            # ── Dynamic symbol selection: locked to AI selector only ──────
+            # Coin rotation is driven exclusively by the AI coin selector (triggered when
+            # session P&L ≤ 0). Scanner still runs in the background for data, but will
+            # NOT switch coins automatically. Manual SWITCH_COIN instruction still works.
             coin_mode = _state.get("coin_mode", "auto")
-            if not em.positions and coin_mode == "auto" and _agent_slot != 0:
-                _ep_excl = _ep.get_other_symbols(_agent_slot)
-                new_symbol = await scanner.scan(exclude=_ep_excl if _ep_excl else None)
+            if not em.positions:
                 top5 = [r["symbol"] for r in scanner.ranked[:5]]
                 update_state(top_coins=top5)
-                if new_symbol != active_symbol:
-                    push_log(f"[SWITCH] {active_symbol} → {new_symbol} | top5={top5}")
-                    log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol, top5=top5)
-                    await _liquidate_before_switch(active_symbol)
-                    await md.close()
-                    active_symbol = new_symbol
-                    md = MarketData(active_symbol, cfg.INTERVAL)
-                    await md.connect()
-                    _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
-                    update_state(symbol=active_symbol, top_coins=top5)
-                else:
-                    push_log(f"[SCAN] staying on {active_symbol} | top5={top5}")
-            elif not em.positions:
-                push_log(f"[COIN_SELECT] Manual mode — holding {active_symbol}")
+                push_log(f"[COIN] Holding {active_symbol} | scanner top5={top5}")
 
             # ── Module 1: Market Data ─────────────────────────────
             try:
@@ -610,27 +598,9 @@ async def main_loop():
             if not md.quality_gate(tick, book):
                 gate_fail_streak += 1
                 push_log(f"[QUALITY_GATE] {active_symbol} — gate fail #{gate_fail_streak}, sitting out")
-                if gate_fail_streak >= GATE_FAIL_SWITCH_AFTER and not em.positions and _agent_slot != 0:
-                    coin_mode = _state.get("coin_mode", "auto")
-                    if coin_mode == "auto":
-                        push_log(f"[QUALITY_GATE] {gate_fail_streak} straight fails — forcing coin switch")
-                        log("AGENT", "GATE_FAIL_SWITCH", symbol=active_symbol, streak=gate_fail_streak)
-                        new_symbol = await scanner.scan(exclude={active_symbol}, force=True)
-                        if new_symbol != active_symbol:
-                            await _liquidate_before_switch(active_symbol)
-                            await md.close()
-                            active_symbol = new_symbol
-                            md = MarketData(active_symbol, cfg.INTERVAL)
-                            await md.connect()
-                            _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
-                            update_state(symbol=active_symbol)
-                            push_log(f"[SWITCH] → {active_symbol} (quality gate escape)")
-                    else:
-                        push_log(f"[QUALITY_GATE] {gate_fail_streak} straight fails — manual mode, holding {active_symbol}")
-                    gate_fail_streak = 0
+                gate_fail_streak = 0
                 await _cycle_sleep()
                 continue
-            gate_fail_streak = 0  # reset on pass
 
             # ── Orphan recovery: reconstruct position from existing balance ──
             if not _orphan_checked:
@@ -711,80 +681,17 @@ async def main_loop():
                                  candles, regime, fear_greed, _pos_info)
                 )
 
-            # ── RANGING: immediately rotate to the next best ranked coin ─────
-            if regime == "RANGING" and not em.positions and _agent_slot != 0:
-                coin_mode = _state.get("coin_mode", "auto")
-                # A named coin_mode (e.g. "BTCUSDT") means "start here" not "stay forever".
-                # When that coin is ranging with no scanner data yet, sit out.
-                # When scanner has better candidates, escape to auto and rotate.
-                _locked_coin = coin_mode if coin_mode not in ("auto", None) else None
-                _can_escape  = coin_mode == "auto" or (
-                    _locked_coin and scanner.ranked and
-                    scanner.ranked[0]["symbol"] != active_symbol
-                )
-                if _can_escape and scanner.ranked:
-                    _pool_exclude = _ep.get_other_symbols(_agent_slot)
-                    for _ in range(len(scanner.ranked)):
-                        _ranked_idx = (_ranked_idx + 1) % len(scanner.ranked)
-                        next_sym    = scanner.ranked[_ranked_idx]["symbol"]
-                        if next_sym not in _pool_exclude:
-                            break
-                    else:
-                        next_sym = active_symbol  # all taken, stay put
-                    if next_sym != active_symbol:
-                        push_log(f"[RANGING_ESCAPE] {active_symbol} is RANGING — rotating to {next_sym}")
-                        log("AGENT", "RANGING_ESCAPE", from_=active_symbol, to=next_sym,
-                            idx=_ranked_idx)
-                        await _liquidate_before_switch(active_symbol)
-                        await md.close()
-                        active_symbol      = next_sym
-                        md                 = MarketData(active_symbol, cfg.INTERVAL)
-                        await md.connect()
-                        _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
-                        # Unlock coin_mode to auto so scanner drives future rotation
-                        update_state(symbol=active_symbol, coin_mode="auto")
-                        none_signal_streak = 0
-                    else:
-                        push_log(f"[RANGING_ESCAPE] {active_symbol} RANGING — no better coin available, sitting out")
-                else:
-                    push_log(f"[RANGING] {active_symbol} is RANGING — sitting out (no scanner data yet)")
+            # ── RANGING: sit out this cycle, no rotation ─────────────────────
+            if regime == "RANGING" and not em.positions:
+                push_log(f"[RANGING] {active_symbol} is RANGING — sitting out")
                 await _cycle_sleep()
                 continue
 
-            # ── Volatile escape: switch coin after 30 min of VOLATILE ─
-            if regime == "VOLATILE" and _agent_slot != 0:
-                if volatile_since == 0.0:
-                    volatile_since = _time.time()
-                elapsed = _time.time() - volatile_since
-                if elapsed >= VOLATILE_ESCAPE_SECS:
-                    mins = int(elapsed // 60)
-                    coin_mode = _state.get("coin_mode", "auto")
-                    if coin_mode == "auto":
-                        push_log(f"[VOLATILE_ESCAPE] {active_symbol} volatile for {mins}m — forcing coin switch")
-                        log("AGENT", "VOLATILE_ESCAPE", symbol=active_symbol, minutes=mins)
-                        if em.positions:
-                            await om.cancel_all()
-                            em.positions.clear()
-                            push_log(f"[VOLATILE_ESCAPE] closed open position to switch coin")
-                        new_symbol = await scanner.scan(exclude={active_symbol}, force=True)
-                        if new_symbol != active_symbol:
-                            push_log(f"[SWITCH] {active_symbol} → {new_symbol} (volatile escape)")
-                            log("AGENT", "SYMBOL_SWITCH", from_=active_symbol, to=new_symbol,
-                                reason="volatile_escape")
-                            await _liquidate_before_switch(active_symbol)
-                            await md.close()
-                            active_symbol = new_symbol
-                            md = MarketData(active_symbol, cfg.INTERVAL)
-                            await md.connect()
-                            _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
-                            update_state(symbol=active_symbol)
-                    else:
-                        push_log(f"[VOLATILE_ESCAPE] {active_symbol} volatile for {mins}m — manual mode, holding")
-                    volatile_since = 0.0
-                    await _cycle_sleep()
-                    continue
-            else:
-                volatile_since = 0.0  # reset counter when regime clears
+            # ── Volatile regime: sit out, no rotation ────────────────────────
+            if regime == "VOLATILE":
+                push_log(f"[VOLATILE] {active_symbol} is VOLATILE — sitting out")
+                await _cycle_sleep()
+                continue
 
             # ── Module 5: Manage open positions ───────────────────
             exit_actions = em.manage_open_positions(current_price, indicators)
@@ -853,37 +760,7 @@ async def main_loop():
                 _ranked_idx        = 0
             else:
                 none_signal_streak += 1
-                coin_mode  = _state.get("coin_mode", "auto")
-                _can_rotate = coin_mode == "auto" or (
-                    coin_mode not in ("auto", None) and scanner.ranked and
-                    scanner.ranked[0]["symbol"] != active_symbol
-                )
-                # Rotate immediately on SELL-no-pos; otherwise wait NONE_SIGNAL_ROTATE cycles
-                _rotate_threshold = 1 if _sell_no_pos else NONE_SIGNAL_ROTATE
-                if _can_rotate and none_signal_streak >= _rotate_threshold and not em.positions and scanner.ranked and _agent_slot != 0:
-                    _pool_exclude = _ep.get_other_symbols(_agent_slot)
-                    for _ in range(len(scanner.ranked)):
-                        _ranked_idx = (_ranked_idx + 1) % len(scanner.ranked)
-                        next_sym    = scanner.ranked[_ranked_idx]["symbol"]
-                        if next_sym not in _pool_exclude:
-                            break
-                    else:
-                        next_sym = active_symbol  # all taken, stay put
-                    if next_sym != active_symbol:
-                        _rotate_reason = "SELL with no position" if _sell_no_pos else f"no setup for {none_signal_streak} cycles"
-                        push_log(f"[ROTATE] {active_symbol}: {_rotate_reason} — switching to {next_sym}")
-                        log("AGENT", "SIGNAL_ROTATE", from_=active_symbol, to=next_sym,
-                            streak=none_signal_streak, idx=_ranked_idx)
-                        await _liquidate_before_switch(active_symbol)
-                        await md.close()
-                        active_symbol      = next_sym
-                        md                 = MarketData(active_symbol, cfg.INTERVAL)
-                        await md.connect()
-                        _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
-                        update_state(symbol=active_symbol, coin_mode="auto")
-                        none_signal_streak = 0
-                    await _cycle_sleep()
-                    continue
+                push_log(f"[SIGNAL] NONE on {active_symbol} | regime={regime} | streak={none_signal_streak}")
 
             # Manual SELL override — close the open position immediately
             if signal == "SELL" and em.positions:
