@@ -1022,6 +1022,16 @@ def push_log(entry: str):
 
 def push_transaction(tx: dict):
     tx["ts"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    # When a close comes in, update the matching open entry so it no longer
+    # appears as an active position (prevents stale "OPEN" rows after stop/TP)
+    side = tx.get("side", "")
+    if "CLOSE" in side:
+        sym = tx.get("symbol", "")
+        for existing in _state["transactions"]:
+            if existing.get("symbol") == sym and existing.get("status") == "OPEN":
+                existing["status"] = tx.get("status", "CLOSED")
+                existing["pnl"]    = tx.get("pnl", "")
+                break
     _state["transactions"].insert(0, tx)
     if len(_state["transactions"]) > 200:
         _state["transactions"].pop()
