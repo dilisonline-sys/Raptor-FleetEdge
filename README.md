@@ -16,7 +16,7 @@ dipu is a multi-agent cryptocurrency trading system built for Binance Spot. A **
 - Agent 1 (slot 0) is permanently locked to BTCUSDT; the other three rotate to the best-ranked coins
 - Liquidates base asset back to USDT automatically before every coin rotation (slots 1–3)
 - Persists open positions across restarts — exact entry, stop, and TP values are restored
-- Each agent exposes a live dashboard with 1-second candle charts, AI analyst panel, and order log
+- Each agent exposes a live dashboard with 1-second candle charts, rule analyst panel, and order log
 
 ---
 
@@ -46,7 +46,6 @@ Each agent runs an independent `agent.py` process. The manager proxy forwards `/
 | Docker | 24+ |
 | Docker Compose | v2 (bundled with Docker Desktop or `docker compose` plugin) |
 | Binance account | Spot trading API key |
-| Anthropic API key | Optional — for AI Analyst feature |
 
 ---
 
@@ -83,9 +82,6 @@ BINANCE_DEMO_API_SECRET=your_demo_secret
 # WARNING: use Trade + Read permissions only — NEVER enable withdrawal
 BINANCE_LIVE_API_KEY=your_live_key
 BINANCE_LIVE_API_SECRET=your_live_secret
-
-# Claude AI Analyst (optional — enables the per-dashboard advisory AI)
-ANTHROPIC_API_KEY=your_anthropic_key
 
 # Webhook for alerts (optional — Discord/Slack/Telegram URL)
 DIPU_ALERT_WEBHOOK=
@@ -129,7 +125,7 @@ Each agent dashboard includes:
 - **Signal / regime / RSI / MACD** — current indicator readings
 - **Open positions** with entry, stop, TP1/TP2 lines on chart
 - **Portfolio card** — full account value: USDT + active spot positions + Simple Earn holdings
-- **AI Analyst panel** — enable/disable per dashboard (requires `ANTHROPIC_API_KEY`)
+- **Rule Analyst panel** — indicator-driven advisory read, enable/disable per dashboard
 - **Order log** — recent fills and open orders
 - **Day / Night theme toggle** — persistent preference saved in `localStorage`
 
@@ -146,7 +142,6 @@ Each agent dashboard includes:
 | `BINANCE_DEMO_API_SECRET` | If demo | |
 | `BINANCE_LIVE_API_KEY` | If live | From api.binance.com — Trade + Read only |
 | `BINANCE_LIVE_API_SECRET` | If live | |
-| `ANTHROPIC_API_KEY` | No | Enables the Claude AI Analyst feature |
 | `DIPU_ALERT_WEBHOOK` | No | Discord/Slack webhook for trade alerts |
 | `DIPU_AUTHORIZED_AGENT_TOKENS` | No | Tokens for external agent POST access |
 
@@ -367,8 +362,8 @@ Each agent accepts POST instructions at `/instruction`. Valid actions:
 | `SWITCH_COIN` | Switch to a specific symbol (e.g. `"symbol":"SOLUSDT"`) |
 | `RESUME_AUTO` | Return to scanner-driven coin selection |
 | `FORCE_BTC` | Switch to BTCUSDT immediately |
-| `AI_ANALYST_ON` | Enable the Claude AI Analyst |
-| `AI_ANALYST_OFF` | Disable the Claude AI Analyst |
+| `ANALYST_ON` | Enable the Rule Analyst |
+| `ANALYST_OFF` | Disable the Rule Analyst |
 
 Example — halt BTC agent:
 
@@ -395,9 +390,9 @@ docker run --rm -v dipu_logs:/tmp alpine tail -f /tmp/dipu_dipu-live.log
 
 ---
 
-## AI Analyst (Optional)
+## Rule Analyst (Optional)
 
-When `ANTHROPIC_API_KEY` is set, each dashboard shows an **AI Analyst** panel. It uses Claude Haiku to analyse current market indicators every 3 minutes and returns:
+Each dashboard shows a **Rule Analyst** panel. It analyses current market indicators every 3 minutes using a deterministic rule engine (no external API) and returns:
 
 - Sentiment (BULLISH / NEUTRAL / BEARISH) with confidence score
 - Trend strength, momentum, key support/resistance levels
@@ -438,7 +433,8 @@ Before switching to `TRADING_MODE=live`:
 | `equity_pool.py` | Shared pool — coordinates budgets, coin exclusions, earn value across agents |
 | `portfolio_tracker.py` | Full account P&L — USDT + spot positions + Simple Earn (Flexible) holdings |
 | `agent_monitor.py` | 30-minute health check with auto-resolution — resumes halted agents, resets baselines, emails report |
-| `ai_analyst.py` | Claude Haiku advisory analyst |
+| `rule_analyst.py` | Indicator-driven advisory analyst |
+| `rule_coin_selector.py` | Rule-based profitability coin selector |
 | `email_notifier.py` | Email alerts — fills, rotations, 4h P&L reports |
 | `instruction_server.py` | Per-agent HTTP dashboard and instruction endpoint |
 | `config.py` | All parameters in one place |

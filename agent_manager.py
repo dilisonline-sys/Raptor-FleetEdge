@@ -441,7 +441,7 @@ const _aiStates = {};
 async function toggleAI(name, port) {
   const on = !_aiStates[name];
   _aiStates[name] = on;
-  const action = on ? 'AI_ANALYST_ON' : 'AI_ANALYST_OFF';
+  const action = on ? 'ANALYST_ON' : 'ANALYST_OFF';
   await fetch(`/agent/${name}/instruction`, {
     method: 'POST',
     headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
@@ -452,7 +452,7 @@ async function toggleAI(name, port) {
     btn.style.background    = on ? '#0a2010' : '#0a0f0a';
     btn.style.borderColor   = on ? '#00e676' : '#1a3a1a';
     btn.style.color         = on ? '#00e676' : '#4caf50';
-    btn.textContent         = on ? '■ AI ON' : '■ AI';
+    btn.textContent         = on ? '■ Analyst ON' : '■ Analyst';
   }
 }
 
@@ -537,7 +537,7 @@ function renderFleet(pool) {
         <div class="slot-actions">
           <button class="btn btn-open" onclick="window.open('/agent/${name}/','_blank')">&#9654; Dashboard</button>
           <button id="ai-btn-${name}" class="btn" onclick="toggleAI('${name}','${port}')"
-            style="font-size:.65rem;padding:4px 8px;background:#0a0f0a;border:1px solid #1a3a1a;color:#4caf50;cursor:pointer">&#9632; AI</button>
+            style="font-size:.65rem;padding:4px 8px;background:#0a0f0a;border:1px solid #1a3a1a;color:#4caf50;cursor:pointer">&#9632; Analyst</button>
           <button class="btn btn-stop" onclick="stopAgent('${name}')" style="padding:6px 10px;font-size:.68rem">&#9646;&#9646;</button>
         </div>
       </div>`;
