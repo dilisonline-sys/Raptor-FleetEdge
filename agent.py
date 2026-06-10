@@ -30,8 +30,8 @@ from logger import log
 import config as cfg
 import email_notifier as _email
 import equity_pool as _ep
-from ai_analyst import AIAnalyst
-from ai_coin_selector import AICoinSelector
+from rule_analyst import RuleAnalyst
+from rule_coin_selector import RuleCoinSelector
 
 
 # ── Position persistence ──────────────────────────────────────────────────
@@ -173,14 +173,14 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
 
 
 async def _run_analyst(analyst, symbol, price, indicators, candles, regime, fear_greed, position):
-    """Fire-and-forget wrapper: runs AI analyst and pushes result to dashboard state."""
+    """Fire-and-forget wrapper: runs rule analyst and pushes result to dashboard state."""
     try:
         result = await analyst.maybe_run(symbol, price, indicators, candles,
                                          regime, fear_greed, position, interval_secs=180)
         if result:
-            update_state(ai_analysis=result)
+            update_state(analysis=result)
     except Exception as e:
-        log("AI_ANALYST", "TASK_ERROR", error=str(e)[:80])
+        log("ANALYST", "TASK_ERROR", error=str(e)[:80])
 
 
 async def main_loop():
@@ -192,8 +192,8 @@ async def main_loop():
     em       = ExitManager()
     rc       = RegimeClassifier()
     fg       = FearGreedClient()
-    analyst  = AIAnalyst()
-    selector  = AICoinSelector()
+    analyst  = RuleAnalyst()
+    selector  = RuleCoinSelector()
     queue       = asyncio.Queue()
     _agent_slot = int(os.environ.get("AGENT_SLOT", "0"))
     _agent_name = os.environ.get("AGENT_NAME", f"dipu-slot{_agent_slot}")
@@ -572,14 +572,14 @@ async def main_loop():
                     update_state(coin_mode="auto")
                     push_log("[RESUME_AUTO] Auto-scanner re-enabled — will switch to best coin next cycle")
                     log("AGENT", "RESUME_AUTO", symbol=active_symbol)
-                elif action == "AI_ANALYST_ON":
+                elif action == "ANALYST_ON":
                     analyst.toggle(True)
-                    update_state(ai_analyst_enabled=True, ai_analysis={})
-                    push_log("[AI_ANALYST] Advisory analyst enabled")
-                elif action == "AI_ANALYST_OFF":
+                    update_state(analyst_enabled=True, analysis={})
+                    push_log("[ANALYST] Advisory analyst enabled")
+                elif action == "ANALYST_OFF":
                     analyst.toggle(False)
-                    update_state(ai_analyst_enabled=False, ai_analysis={})
-                    push_log("[AI_ANALYST] Advisory analyst disabled")
+                    update_state(analyst_enabled=False, analysis={})
+                    push_log("[ANALYST] Advisory analyst disabled")
             except asyncio.QueueEmpty:
                 pass
 
@@ -589,8 +589,8 @@ async def main_loop():
                 await _cycle_sleep()
                 continue
 
-            # ── Dynamic symbol selection: locked to AI selector only ──────
-            # Coin rotation is driven exclusively by the AI coin selector (triggered when
+            # ── Dynamic symbol selection: locked to rule selector only ──────
+            # Coin rotation is driven exclusively by the rule-based coin selector (triggered when
             # session P&L ≤ 0). Scanner still runs in the background for data, but will
             # NOT switch coins automatically. Manual SWITCH_COIN instruction still works.
             coin_mode = _state.get("coin_mode", "auto")
@@ -684,7 +684,7 @@ async def main_loop():
             push_log(f"[CYCLE] {active_symbol} | price={current_price:.4f} | regime={regime} "
                      f"| RSI={indicators['rsi14']:.1f} | EMA9={indicators['ema9']:.4f}")
 
-            # ── AI Analyst (advisory) ─────────────────────────────────────────
+            # ── Rule Analyst (advisory) ─────────────────────────────────────────
             if analyst.enabled:
                 _pos_info = None
                 if em.positions:
@@ -933,7 +933,7 @@ async def main_loop():
                 session_start_equity=round(_session_start_equity, 2),
             )
 
-            # ── AI coin selection trigger: fires once when session P&L ≤ 0 ─
+            # ── Coin selection trigger: fires once when session P&L ≤ 0 ─
             # Resets when P&L recovers above 0 so it can fire again on the next drawdown.
             if _s_pnl > 0:
                 _ai_sel_triggered  = False
@@ -943,19 +943,19 @@ async def main_loop():
                 # their coins in the equity pool before later slots query it
                 if _ai_sel_pending_ts == 0.0:
                     _ai_sel_pending_ts = _time.time() + _agent_slot * 20
-                    push_log(f"[AI_SELECT] P&L {_s_pnl:+.4f} ≤ 0 — selection fires in {_agent_slot * 20}s")
+                    push_log(f"[SELECT] P&L {_s_pnl:+.4f} ≤ 0 — selection fires in {_agent_slot * 20}s")
                 elif _time.time() < _ai_sel_pending_ts:
                     pass  # still in stagger window
                 else:
                     # Stagger elapsed — fire now
                     _ai_sel_triggered  = True
                     _ai_sel_pending_ts = 0.0
-                    log("AGENT", "AI_SELECT_TRIGGERED", session_pnl=round(_s_pnl, 4))
+                    log("AGENT", "SELECT_TRIGGERED", session_pnl=round(_s_pnl, 4))
 
                     # Build exclusion set: all coins in use by other slots + BTCUSDT (slot 0 locked)
                     _hard_excl = _ep.get_other_symbols(_agent_slot) | {"BTCUSDT"}
 
-                    # Build candidate list, stripping already-taken and BTC coins before AI sees them
+                    # Build candidate list, stripping already-taken and BTC coins before the selector sees them
                     _sel_candidates = [
                         {
                             "symbol":     r["symbol"],
@@ -970,10 +970,10 @@ async def main_loop():
                         if r["symbol"] not in _hard_excl
                     ] if scanner.ranked else []
 
-                    push_log(f"[AI_SELECT] Firing for slot {_agent_slot} | excluded={sorted(_hard_excl)} | candidates={[c['symbol'] for c in _sel_candidates[:5]]}")
+                    push_log(f"[SELECT] Firing for slot {_agent_slot} | excluded={sorted(_hard_excl)} | candidates={[c['symbol'] for c in _sel_candidates[:5]]}")
 
                     if not _sel_candidates:
-                        push_log(f"[AI_SELECT] No candidates after exclusion — will retry in 15m")
+                        push_log(f"[SELECT] No candidates after exclusion — will retry in 15m")
                         _ai_sel_triggered  = False
                         _ai_sel_pending_ts = _time.time() + 900
                     else:
@@ -985,14 +985,14 @@ async def main_loop():
                                 _profitable_recs = [
                                     r for r in _sel_result.get("recommendations", [])
                                     if r.get("profitable") and r.get("confidence", 0) >= 65
-                                    and r["symbol"] not in _hard_excl  # double-check after AI response
+                                    and r["symbol"] not in _hard_excl  # double-check after selector response
                                 ]
-                                push_log(f"[AI_SELECT] Market: {_sel_result.get('market_comment','')} | Profitable: {[r['symbol'] for r in _profitable_recs]}")
+                                push_log(f"[SELECT] Market: {_sel_result.get('market_comment','')} | Profitable: {[r['symbol'] for r in _profitable_recs]}")
                                 _assigned = False
                                 for _rec in _profitable_recs:
                                     _sel_sym = _rec["symbol"]
-                                    push_log(f"[AI_SELECT] → {_sel_sym} conf={_rec['confidence']}% est_rr={_rec.get('est_rr','?')}x | {_rec.get('reason','')}")
-                                    log("AGENT", "AI_SELECT_ASSIGN", symbol=_sel_sym,
+                                    push_log(f"[SELECT] → {_sel_sym} conf={_rec['confidence']}% est_rr={_rec.get('est_rr','?')}x | {_rec.get('reason','')}")
+                                    log("AGENT", "SELECT_ASSIGN", symbol=_sel_sym,
                                         confidence=_rec["confidence"], est_rr=_rec.get("est_rr"))
                                     if _sel_sym != active_symbol:
                                         await _liquidate_before_switch(active_symbol)
@@ -1007,15 +1007,15 @@ async def main_loop():
                                     _assigned = True
                                     break
                                 if not _assigned:
-                                    push_log(f"[AI_SELECT] No profitable pick — will retry in 15m")
+                                    push_log(f"[SELECT] No profitable pick — will retry in 15m")
                                     _ai_sel_triggered  = False
                                     _ai_sel_pending_ts = _time.time() + 900
                             else:
-                                push_log(f"[AI_SELECT] AI unavailable — will retry in 15m")
+                                push_log(f"[SELECT] Selector returned nothing — will retry in 15m")
                                 _ai_sel_triggered  = False
                                 _ai_sel_pending_ts = _time.time() + 900
                         except Exception as _sel_e:
-                            log("AI_SELECTOR", "TRIGGER_ERROR", error=str(_sel_e)[:80])
+                            log("SELECTOR", "TRIGGER_ERROR", error=str(_sel_e)[:80])
                             _ai_sel_triggered  = False
                             _ai_sel_pending_ts = _time.time() + 900
 
