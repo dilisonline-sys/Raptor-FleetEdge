@@ -9,7 +9,7 @@ from aiohttp import web
 from logger import log
 import config as cfg
 
-VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO", "AI_ANALYST_ON", "AI_ANALYST_OFF"}
+VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO", "ANALYST_ON", "ANALYST_OFF"}
 
 _state = {
     "started_at":    time.time(),
@@ -44,8 +44,8 @@ _state = {
     "coin_qty":         0.0,
     "coin_value_usdt":  0.0,
     "coin_asset":       "—",
-    "ai_analyst_enabled": False,
-    "ai_analysis":      {},
+    "analyst_enabled": False,
+    "analysis":        {},
     "portfolio":        {},
 }
 
@@ -233,7 +233,7 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 </div>
 
 <h2 style="display:flex;align-items:center;justify-content:space-between">
-  <span>&#9632; AI Analyst <span style="font-size:.6rem;color:#fff;font-weight:normal;margin-left:6px">advisory only · does not affect trades</span></span>
+  <span>&#9632; Rule Analyst <span style="font-size:.6rem;color:#fff;font-weight:normal;margin-left:6px">advisory only · does not affect trades</span></span>
   <button id="ai-toggle-btn" onclick="toggleAnalyst()" style="font-size:.68rem;padding:4px 12px;border-radius:4px;border:1px solid #333;background:#111;color:#fff;cursor:pointer">Enable</button>
 </h2>
 <div id="ai-panel" style="display:none;background:#0a0d0a;border:1px solid #1a2e1a;border-radius:8px;padding:14px;margin-bottom:20px;font-size:.73rem">
@@ -314,17 +314,6 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
     <div style="font-size:.65rem;color:#fff;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Order History</div>
     <div id="order-history-wrap" style="background:#0d0d0d;border:1px solid #1e1e1e;border-radius:6px;padding:10px;font-size:.7rem;min-height:40px"></div>
   </div>
-</div>
-
-<h2>&#9646; AI Usage &amp; Cost</h2>
-<div style="background:#0d0d0d;border:1px solid #1e1e1e;border-radius:8px;padding:14px;margin-bottom:16px">
-  <div style="display:flex;gap:24px;margin-bottom:12px;font-size:.75rem">
-    <div>Requests: <span id="ai-total-req" style="color:#ffd600;font-weight:600">—</span></div>
-    <div>Input tokens: <span id="ai-total-in" style="color:#82b1ff;font-weight:600">—</span></div>
-    <div>Output tokens: <span id="ai-total-out" style="color:#82b1ff;font-weight:600">—</span></div>
-    <div>Total cost: <span id="ai-total-cost" style="color:#00e676;font-weight:600">—</span></div>
-  </div>
-  <div id="ai-log-wrap" style="font-size:.68rem;max-height:180px;overflow-y:auto"></div>
 </div>
 
 <h2>&#9646; Transactions</h2>
@@ -827,38 +816,6 @@ function renderScanner(s) {
   }).join('');
 }
 
-// ── AI Usage Log ──────────────────────────────────────────
-async function loadAILog() {
-  try {
-    const r = await fetch('/api/ai-log');
-    const d = await r.json();
-    document.getElementById('ai-total-req').textContent  = d.total_requests.toLocaleString();
-    document.getElementById('ai-total-in').textContent   = d.total_input_tokens.toLocaleString();
-    document.getElementById('ai-total-out').textContent  = d.total_output_tokens.toLocaleString();
-    document.getElementById('ai-total-cost').textContent = '$' + d.total_cost_usd.toFixed(4);
-    const wrap = document.getElementById('ai-log-wrap');
-    if (!d.records || d.records.length === 0) {
-      wrap.innerHTML = '<span style="color:#fff">No AI calls logged yet.</span>';
-      return;
-    }
-    const rows = [...d.records].reverse().map(r => {
-      const dt = new Date(r.ts * 1000).toISOString().replace('T',' ').slice(0,19);
-      const cost = '$' + (r.cost_usd || 0).toFixed(6);
-      return `<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px solid #1a1a1a">
-        <span style="color:#fff;min-width:135px">${dt}</span>
-        <span style="color:#ffd600;min-width:90px">${r.purpose || '—'}</span>
-        <span style="color:#fff;min-width:160px">${r.model || '—'}</span>
-        <span style="color:#82b1ff;min-width:70px">in:${(r.input_tokens||0).toLocaleString()}</span>
-        <span style="color:#82b1ff;min-width:70px">out:${(r.output_tokens||0).toLocaleString()}</span>
-        <span style="color:#00e676">${cost}</span>
-      </div>`;
-    }).join('');
-    wrap.innerHTML = rows;
-  } catch(e) {
-    document.getElementById('ai-log-wrap').innerHTML = `<span style="color:#ff6d6d">Error: ${e.message}</span>`;
-  }
-}
-
 // ── Binance Orders ────────────────────────────────────────
 async function loadOrders() {
   document.getElementById('orders-refresh').textContent = '↻ loading…';
@@ -892,7 +849,7 @@ async function loadOrders() {
   document.getElementById('orders-refresh').textContent = '⟳ refresh';
 }
 
-// ── AI Analyst ────────────────────────────────────────────
+// ── Rule Analyst ──────────────────────────────────────────
 let _aiEnabled = false;
 
 async function toggleAnalyst() {
@@ -907,7 +864,7 @@ async function toggleAnalyst() {
     btn.style.color = newState ? '#00e676' : '#aaa';
   }
   if (panel) panel.style.display = newState ? 'block' : 'none';
-  const action = newState ? 'AI_ANALYST_ON' : 'AI_ANALYST_OFF';
+  const action = newState ? 'ANALYST_ON' : 'ANALYST_OFF';
   await fetch('/instruction', {
     method: 'POST',
     headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
@@ -916,7 +873,7 @@ async function toggleAnalyst() {
 }
 
 function renderAnalyst(s) {
-  const enabled = s.ai_analyst_enabled || false;
+  const enabled = s.analyst_enabled || false;
   const btn = document.getElementById('ai-toggle-btn');
   const panel = document.getElementById('ai-panel');
   if (!btn || !panel) return;
@@ -927,7 +884,7 @@ function renderAnalyst(s) {
   btn.style.color = enabled ? '#00e676' : '#aaa';
   panel.style.display = enabled ? 'block' : 'none';
   if (!enabled) return;
-  const a = s.ai_analysis || {};
+  const a = s.analysis || {};
   if (!a.sentiment) return;
   const sentColors = {BULLISH:'#00e676', NEUTRAL:'#ffd600', BEARISH:'#ff1744'};
   const entryColors = {EXCELLENT:'#00e676', GOOD:'#82ff82', POOR:'#ffd600', AVOID:'#ff1744'};
@@ -982,10 +939,8 @@ renderCoinSelector([], 'auto');
 refresh();
 connectSSE();
 loadOrders();
-loadAILog();
 setInterval(() => { if (_currentSym) refreshChart(_currentSym); }, 60 * 1000); // fallback chart refresh every 60s
 setInterval(loadOrders, 30000);
-setInterval(loadAILog, 60000); // AI cost refreshes every 60s
 </script>
 </body>
 </html>
@@ -1071,7 +1026,6 @@ class InstructionServer:
         self._app.router.add_get("/api/state",    self._api_state)
         self._app.router.add_get("/api/chart",    self._chart)
         self._app.router.add_get("/api/orders",   self._orders)
-        self._app.router.add_get("/api/ai-log",   self._ai_log)
         self._app.router.add_post("/instruction", self._handle)
         self._app.router.add_get("/status",       self._status)
         self._app.router.add_get("/api/pool",     self._pool_state)
@@ -1213,10 +1167,6 @@ class InstructionServer:
         if action in URGENT_ACTIONS and wake_event is not None:
             wake_event.set()
         return web.json_response({"status": "queued", "action": action})
-
-    async def _ai_log(self, request: web.Request) -> web.Response:
-        from ai_logger import get_summary
-        return web.json_response(get_summary(last_n=50))
 
     async def _status(self, request: web.Request) -> web.Response:
         if not _auth(request):
