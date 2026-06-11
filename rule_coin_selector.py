@@ -72,7 +72,9 @@ def _assess(c: dict, fg_val: int) -> tuple[bool, int, str]:
     confidence += min(10, int(score * 10))
     confidence = min(95, max(0, confidence))
 
-    bar = 75 if fg_val < 30 else 65
+    # Raise the bar only in true extreme fear (< 20), not regular fear (20-30).
+    # At F&G 20-29 the risk is already captured by size_multiplier() halving the qty.
+    bar = 75 if fg_val < 20 else 65
     profitable = confidence >= bar and chg_pct > -0.5
     reason = (
         f"TRENDING {trend} momentum, {chg_pct:+.2f}% change, ATR {atr_pct:.2f}%, "
@@ -122,7 +124,7 @@ class RuleCoinSelector:
 
         recommendations.sort(key=lambda r: r["confidence"], reverse=True)
 
-        if fg_val < 30:
+        if fg_val < 20:
             market_comment = f"Extreme fear (F&G {fg_val}) — confidence bar raised to 75 for longs."
         elif fg_val < 45:
             market_comment = f"Fearful market (F&G {fg_val}) — only strong TRENDING setups considered."

@@ -833,10 +833,13 @@ class AgentManager:
         except Exception:
             return web.json_response({"slots": {str(i): None for i in range(4)}, "ts": 0})
 
-    async def _spawn_fleet(self, request: web.Request) -> web.Response:
-        """Fetch top 4 coins from Binance and spawn live agents for empty slots."""
+    async def _do_spawn_fleet(self) -> dict:
+        """Fetch top 4 coins by 1h momentum and spawn live agents for empty slots.
+
+        Returns the result dict used by both the HTTP handler and the auto-spawn
+        scheduler so the logic lives in exactly one place.
+        """
         import json as _j, urllib.parse as _up, aiohttp as _aio
-        # Fetch top 4 by 1h momentum
         try:
             async with _aio.ClientSession() as s:
                 async with s.get(BINANCE_PUBLIC + "/api/v3/ticker/24hr",
@@ -886,6 +889,7 @@ class AgentManager:
             results.sort(key=lambda x: x["score"], reverse=True)
             top4 = [r["symbol"] for r in results[:4]]
         except Exception as e:
+            print(f"[manager] fleet coin fetch failed: {e} — using fallback")
             top4 = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]
 
         # Slot 0 is permanently BTC; fill the other 3 from top momentum picks (excluding BTC)
@@ -907,7 +911,39 @@ class AgentManager:
             else:
                 spawned.append({"slot": slot, "name": name, "status": "failed"})
 
-        return web.json_response({"ok": True, "agents": spawned, "top4": top4})
+        return {"ok": True, "agents": spawned, "top4": top4}
+
+    async def _spawn_fleet(self, request: web.Request) -> web.Response:
+        """HTTP handler — delegates to _do_spawn_fleet."""
+        result = await self._do_spawn_fleet()
+        return web.json_response(result)
+
+    async def _auto_spawn_scheduler(self):
+        """Auto-spawn the live fleet on container startup.
+
+        Waits 5 s for the manager to settle, then spawns any empty live slots.
+        Skips if agents are already running (e.g. hot-restart with live PIDs).
+        """
+        await asyncio.sleep(5)
+        # Check whether any live slot is already occupied
+        live_running = any(
+            info.get("mode") == "live" and _pid_alive(info.get("pid", 0))
+            for info in _agents.values()
+        )
+        if live_running:
+            print("[manager] auto-spawn skipped — live agents already running")
+            return
+        print("[manager] auto-spawning live fleet…")
+        try:
+            result = await self._do_spawn_fleet()
+            ok     = [a for a in result["agents"] if a["status"] == "spawned"]
+            skip   = [a for a in result["agents"] if a["status"] == "already_running"]
+            fail   = [a for a in result["agents"] if a["status"] == "failed"]
+            print(f"[manager] auto-spawn complete — "
+                  f"{len(ok)} spawned, {len(skip)} already running, {len(fail)} failed | "
+                  f"coins: {result['top4']}")
+        except Exception as e:
+            print(f"[manager] auto-spawn error: {e}")
 
     def _load_email_cfg(self) -> dict:
         try:
@@ -1030,13 +1066,31 @@ class AgentManager:
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", MANAGER_PORT)
         await site.start()
+        asyncio.create_task(self._auto_spawn_scheduler())
         asyncio.create_task(self._pnl_report_scheduler())
         asyncio.create_task(self._log_cleaner_scheduler())
         asyncio.create_task(self._monitor_scheduler())
         print(f"[manager] running on :{MANAGER_PORT}")
 
 
+def _install_sigchld_reaper():
+    """Reap zombie children automatically so they don't accumulate."""
+    import signal as _sig
+
+    def _reap(*_):
+        try:
+            while True:
+                pid, _ = os.waitpid(-1, os.WNOHANG)
+                if pid == 0:
+                    break
+        except ChildProcessError:
+            pass
+
+    _sig.signal(_sig.SIGCHLD, _reap)
+
+
 async def main():
+    _install_sigchld_reaper()
     _startup_cleanup()
     _load_state()
     await _fetch_available_coins()

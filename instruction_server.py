@@ -810,7 +810,7 @@ function renderScanner(s) {
       <td style="padding:5px 8px;text-align:center;color:${trendClr}">${r.trend || '—'}</td>
       <td style="padding:5px 8px;text-align:center;color:${regClr};font-weight:bold;font-size:.68rem">${r.regime || '—'}</td>
       <td style="padding:5px 8px;text-align:center">
-        <button onclick="switchCoin('${r.symbol}')" style="background:#161616;color:#00e5ff;border:1px solid #00e5ff;padding:2px 8px;border-radius:3px;font-size:.65rem;cursor:pointer">Switch</button>
+        <button onclick="selectCoin('${r.symbol}')" style="background:#161616;color:#00e5ff;border:1px solid #00e5ff;padding:2px 8px;border-radius:3px;font-size:.65rem;cursor:pointer">Switch</button>
       </td>
     </tr>`;
   }).join('');

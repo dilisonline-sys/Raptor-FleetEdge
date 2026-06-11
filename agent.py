@@ -32,6 +32,7 @@ import email_notifier as _email
 import equity_pool as _ep
 from rule_analyst import RuleAnalyst
 from rule_coin_selector import RuleCoinSelector
+from nn_predictor import PricePredictor
 
 
 # ── Position persistence ──────────────────────────────────────────────────
@@ -156,8 +157,9 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
     # Trend-transition BUY: bear stack but MACD has gone bullish and price reclaimed EMA50.
     # Captures early reversals where EMA stack lags the actual price recovery.
     # MACD > signal confirms momentum shift; price > EMA50 confirms structure recovery.
+    # RSI window widened to 38-72: catches more genuine reversals without being too loose.
     transition_long = (ema_bear and macd > msig and price > e50
-                       and 45 < rsi < 68 and candle_bull)
+                       and 38 < rsi < 72 and candle_bull)
 
     # In a bear trend: allow bear_reversal and transition_long
     if ema_bear:
@@ -166,6 +168,14 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
         long_signal = long_momentum or long_pullback or long_bb
 
     short_signal = short_momentum or short_pullback
+
+    log("SIGNAL", "EVAL",
+        ema_bull=ema_bull, ema_bear=ema_bear,
+        rsi=round(rsi, 1), macd_vs_sig=round(macd - msig, 6),
+        candle_body=round(candle_body_pct, 3), body_thr=round(body_threshold, 3),
+        long_momentum=long_momentum, long_pullback=long_pullback,
+        long_bb=long_bb, bear_rev=bear_reversal, transition=transition_long,
+        result="BUY" if long_signal else ("SELL" if short_signal else "NONE"))
 
     if long_signal:  return "BUY"
     if short_signal: return "SELL"
@@ -192,8 +202,9 @@ async def main_loop():
     em       = ExitManager()
     rc       = RegimeClassifier()
     fg       = FearGreedClient()
-    analyst  = RuleAnalyst()
+    analyst   = RuleAnalyst()
     selector  = RuleCoinSelector()
+    predictor = PricePredictor()
     queue       = asyncio.Queue()
     _agent_slot = int(os.environ.get("AGENT_SLOT", "0"))
     _agent_name = os.environ.get("AGENT_NAME", f"dipu-slot{_agent_slot}")
@@ -234,8 +245,13 @@ async def main_loop():
             day_start=round(_spot_day_start, 2), earn_stripped=round(_earn_val, 2))
     else:
         # Fallback: fetch live equity on startup (used if no portfolio day file exists yet)
-        _init_equity = await om.get_balances_raw(cfg.SYMBOL)
-        risk.update_metrics(_init_equity[0])  # index 0 = non-base usdt equiv
+        try:
+            _init_equity = await om.get_balances_raw(cfg.SYMBOL)
+            risk.update_metrics(_init_equity[0])  # index 0 = non-base usdt equiv
+        except Exception as _bal_err:
+            log("AGENT", "BALANCE_FETCH_FAILED",
+                error=str(_bal_err)[:200],
+                hint="Check API keys in .env — agent will start but cannot trade")
     equity = risk.day_start_equity or 0.0  # ensure equity var is defined for READY log below
 
     async def _price_pusher():
@@ -367,9 +383,10 @@ async def main_loop():
     _pool_pnl:           float      = 0.0   # cached daily pnl — reported to pool every cycle start
     _orphan_checked:     bool       = False  # one-shot: recover orphaned base-asset positions on restart
     _last_fill_time:     dict       = {}    # symbol → last fill timestamp (entry cooldown)
+    _nn_cycle_count:     int        = 0     # incremented each cycle; triggers NN retrain at interval
     VOLATILE_ESCAPE_SECS   = 600           # 10 minutes
     GATE_FAIL_SWITCH_AFTER = 2            # switch coin after 2 straight gate fails (~2 min)
-    NONE_SIGNAL_ROTATE     = 5            # rotate to next ranked coin after 5 NONE cycles (~5 min)
+    NONE_SIGNAL_ROTATE     = 3            # rotate to next ranked coin after 3 NONE cycles (~3 min)
 
     async def _cycle_sleep():
         """Sleep one cycle, but wake immediately if _wake event is fired."""
@@ -614,9 +631,43 @@ async def main_loop():
             if not md.quality_gate(tick, book):
                 gate_fail_streak += 1
                 push_log(f"[QUALITY_GATE] {active_symbol} — gate fail #{gate_fail_streak}, sitting out")
-                gate_fail_streak = 0
+                if (gate_fail_streak >= GATE_FAIL_SWITCH_AFTER
+                        and not em.positions
+                        and _agent_slot != 0
+                        and coin_mode == "auto"
+                        and scanner.ranked):
+                    _gf_excl = _ep.get_other_symbols(_agent_slot) | {"BTCUSDT"}
+                    _gf_next = [r["symbol"] for r in scanner.ranked[:8]
+                                if r["symbol"] not in _gf_excl and r["symbol"] != active_symbol]
+                    if _gf_next:
+                        _gf_sym = _gf_next[0]
+                        push_log(f"[ROTATE] Gate fail ×{gate_fail_streak} on {active_symbol} → {_gf_sym}")
+                        log("AGENT", "COIN_ROTATE_GATE_FAIL",
+                            from_=active_symbol, to=_gf_sym, streak=gate_fail_streak)
+                        await md.close()
+                        active_symbol = _gf_sym
+                        md = MarketData(active_symbol, cfg.INTERVAL)
+                        await md.connect()
+                        _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
+                        update_state(symbol=active_symbol)
+                        gate_fail_streak = 0
                 await _cycle_sleep()
                 continue
+            gate_fail_streak = 0
+
+            # ── NN model: retrain when symbol changes or interval elapses ────
+            _nn_cycle_count += 1
+            if (not predictor.is_trained
+                    or predictor.symbol != active_symbol
+                    or _nn_cycle_count >= 100):
+                try:
+                    _nn_acc = predictor.train(candles, active_symbol)
+                    _nn_cycle_count = 0
+                    update_state(nn_accuracy=round(_nn_acc * 100, 1))
+                    push_log(f"[NN] Model retrained on {active_symbol} — "
+                             f"accuracy={_nn_acc*100:.1f}%  (samples≈{len(candles)-12})")
+                except Exception as _nn_e:
+                    log("NN", "TRAIN_ERROR", symbol=active_symbol, error=str(_nn_e)[:120])
 
             # ── Orphan recovery: reconstruct position from existing balance ──
             if not _orphan_checked:
@@ -697,17 +748,40 @@ async def main_loop():
                                  candles, regime, fear_greed, _pos_info)
                 )
 
-            # ── RANGING: sit out this cycle, no rotation ─────────────────────
-            if regime == "RANGING" and not em.positions:
-                push_log(f"[RANGING] {active_symbol} is RANGING — sitting out")
+            # ── RANGING / VOLATILE with no position: rotate if stuck ────────
+            # Old code did a bare `continue` here, which skipped none_signal_streak
+            # increment and the rotation block — agent would never leave a RANGING coin.
+            # Fixed: increment streak and rotate after NONE_SIGNAL_ROTATE cycles,
+            # same as the main rotation block.  VOLATILE *with* an open position falls
+            # through so that TP/stop management still runs.
+            if regime in ("RANGING", "VOLATILE") and not em.positions:
+                none_signal_streak += 1
+                push_log(f"[{regime}] {active_symbol} — no-entry | streak={none_signal_streak}")
+                if (none_signal_streak >= NONE_SIGNAL_ROTATE
+                        and _agent_slot != 0
+                        and coin_mode == "auto"
+                        and scanner.ranked):
+                    _rot_excl = _ep.get_other_symbols(_agent_slot) | {"BTCUSDT"}
+                    _rot_next = [r["symbol"] for r in scanner.ranked[:8]
+                                 if r["symbol"] not in _rot_excl and r["symbol"] != active_symbol]
+                    if _rot_next:
+                        _rot_sym = _rot_next[0]
+                        push_log(f"[ROTATE] {active_symbol} "
+                                 f"({regime.lower()}×{none_signal_streak}) → {_rot_sym}")
+                        log("AGENT", "COIN_ROTATE", from_=active_symbol, to=_rot_sym,
+                            reason=f"{regime.lower()}×{none_signal_streak}")
+                        await _liquidate_before_switch(active_symbol)
+                        await md.close()
+                        active_symbol = _rot_sym
+                        md = MarketData(active_symbol, cfg.INTERVAL)
+                        await md.connect()
+                        _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
+                        update_state(symbol=active_symbol, coin_mode="auto")
+                        none_signal_streak = 0
+                        _ranked_idx = 0
                 await _cycle_sleep()
                 continue
-
-            # ── Volatile regime: sit out, no rotation ────────────────────────
-            if regime == "VOLATILE":
-                push_log(f"[VOLATILE] {active_symbol} is VOLATILE — sitting out")
-                await _cycle_sleep()
-                continue
+            # VOLATILE *with* open position: falls through to manage_open_positions below
 
             # ── Module 5: Manage open positions ───────────────────
             exit_actions = em.manage_open_positions(current_price, indicators)
@@ -763,6 +837,34 @@ async def main_loop():
             # ── Signal ────────────────────────────────────────────
             signal = signal_engine(indicators, regime, override=pending_override)
             pending_override = None
+
+            # ── Neural network signal augmentation ───────────────────────────
+            # _nn_prob is computed once here and reused throughout the rest of the
+            # cycle (BUY initiation, SELL initiation, and the confirmation gate).
+            _nn_prob = predictor.predict(candles)
+            update_state(nn_confidence=round(_nn_prob * 100, 1))
+            NN_BUY_THRESHOLD  = 0.70   # initiates a BUY even when rule engine says NONE
+            NN_SELL_THRESHOLD = 0.30   # triggers protective exit on an open position
+
+            # Promote NONE → BUY when NN is highly confident of an up-move in TRENDING
+            if (signal == "NONE"
+                    and not em.positions
+                    and regime == "TRENDING"
+                    and _nn_prob >= NN_BUY_THRESHOLD):
+                push_log(f"[NN] {active_symbol} up={_nn_prob:.1%} in TRENDING "
+                         f"— initiating BUY (subject to all gates)")
+                log("NN", "BUY_INITIATED", symbol=active_symbol, prob=round(_nn_prob, 3))
+                signal = "BUY"
+
+            # Trigger early exit when NN strongly predicts a down-move on open position
+            if (signal != "SELL"
+                    and em.positions
+                    and _nn_prob <= NN_SELL_THRESHOLD):
+                push_log(f"[NN] {active_symbol} down={1 - _nn_prob:.1%} "
+                         f"— triggering protective exit on open position")
+                log("NN", "SELL_INITIATED", symbol=active_symbol, prob=round(_nn_prob, 3))
+                signal = "SELL"
+
             update_state(last_signal=signal)
             # SELL with no open position is spot-untradeable — treat like NONE for rotation.
             # Without this, a bear-trending coin produces endless SELL signals and the agent
@@ -771,12 +873,48 @@ async def main_loop():
             # SELL with no position = coin is falling and we can't short; rotate immediately
             _sell_no_pos = signal == "SELL" and not em.positions
             if _actionable:
-                push_log(f"[SIGNAL] {signal} on {active_symbol} | regime={regime}")
+                push_log(f"[SIGNAL] {signal} on {active_symbol} | regime={regime} "
+                         f"| nn={_nn_prob:.1%}")
                 none_signal_streak = 0
                 _ranked_idx        = 0
             else:
                 none_signal_streak += 1
-                push_log(f"[SIGNAL] NONE on {active_symbol} | regime={regime} | streak={none_signal_streak}")
+                push_log(f"[SIGNAL] NONE on {active_symbol} | regime={regime} "
+                         f"| nn={_nn_prob:.1%} | streak={none_signal_streak}")
+
+            # ── Auto coin rotation ─────────────────────────────────────────────
+            # Rotate when the coin is stuck (bear trend, RANGING, or no signal).
+            # _sell_no_pos  : coin is in bear trend; rotate after 1 cycle (can't short spot).
+            # none_signal_streak: RANGING/VOLATILE/no-setup — rotate after NONE_SIGNAL_ROTATE cycles.
+            # slot 0 is BTC-locked; demo locks to its assigned coin.
+            _can_rotate = (not em.positions
+                           and _agent_slot != 0
+                           and coin_mode == "auto"
+                           and scanner.ranked)
+            _should_rotate = (_sell_no_pos
+                              or none_signal_streak >= NONE_SIGNAL_ROTATE)
+            if _can_rotate and _should_rotate:
+                _rot_excl = _ep.get_other_symbols(_agent_slot) | {"BTCUSDT"}
+                _rot_next = [r["symbol"] for r in scanner.ranked[:8]
+                             if r["symbol"] not in _rot_excl and r["symbol"] != active_symbol]
+                if _rot_next:
+                    _rot_sym = _rot_next[0]
+                    _reason  = "bear_trend" if _sell_no_pos else f"no_signal×{none_signal_streak}"
+                    push_log(f"[ROTATE] {active_symbol} ({_reason}) → {_rot_sym}")
+                    log("AGENT", "COIN_ROTATE",
+                        from_=active_symbol, to=_rot_sym, reason=_reason)
+                    if _agent_slot != 0:
+                        await _liquidate_before_switch(active_symbol)
+                    await md.close()
+                    active_symbol = _rot_sym
+                    md = MarketData(active_symbol, cfg.INTERVAL)
+                    await md.connect()
+                    _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
+                    update_state(symbol=active_symbol, coin_mode="auto")
+                    none_signal_streak = 0
+                    _ranked_idx        = 0
+                    await _cycle_sleep()
+                    continue
 
             # Manual SELL override — close the open position immediately
             if signal == "SELL" and em.positions:
@@ -818,8 +956,12 @@ async def main_loop():
             # Prevents entering a new trade in the same cycle a stop-loss was hit — the daily
             # DD limit may have just been breached (as happened: FIDA stop → AIGENSYN entry).
             if not em.positions:
-                _post_close_equity = await om.get_equity(symbol=active_symbol, price=current_price)
-                risk.update_metrics(_post_close_equity)
+                try:
+                    _post_close_equity = await om.get_equity(symbol=active_symbol, price=current_price)
+                    risk.update_metrics(_post_close_equity)
+                except Exception as _eq_err:
+                    log("AGENT", "EQUITY_FETCH_FAILED", error=str(_eq_err)[:160])
+                    # Use last known equity for risk check — don't block entry on transient API error
                 if risk.halt_active():
                     update_state(halt=True)
                     push_log(f"[HALT] Daily DD limit reached after exit — no new entries this session")
@@ -838,8 +980,17 @@ async def main_loop():
                     signal = "NONE"
 
             if signal == "BUY" and not em.positions:
-                usdt_equiv, base_bal, raw_usdt = await om.get_balances_raw(active_symbol)
-                equity = usdt_equiv + base_bal * current_price  # full equity (includes BTC)
+                try:
+                    usdt_equiv, base_bal, raw_usdt = await om.get_balances_raw(active_symbol)
+                    equity = usdt_equiv + base_bal * current_price  # full equity (includes BTC)
+                except Exception as _bal_err:
+                    log("AGENT", "BALANCE_FETCH_FAILED_GATE", error=str(_bal_err)[:160])
+                    signal = "NONE"
+                    await _cycle_sleep()
+                    continue
+                log("AGENT", "BUY_GATE_ENTER",
+                    symbol=active_symbol, equity=round(equity, 2),
+                    raw_usdt=round(raw_usdt, 2), price=current_price)
                 stop_d = indicators["atr14"] * cfg.ATR_STOP_MULT
                 # Effective TP1 uses the same floor logic as exit_manager: max(h1_range, ATR)
                 _h1r         = indicators.get("h1_range", 0)
@@ -849,17 +1000,26 @@ async def main_loop():
                 min_tp_dist  = current_price * 0.0022  # 0.22% = round-trip fees (2×0.1%) + 0.02% margin
                 if tp1_dist < min_tp_dist:
                     push_log(f"[SKIP] {active_symbol} TP1 too close ({tp1_dist/current_price*100:.3f}%) — won't cover fees")
+                    log("AGENT", "GATE_BLOCK_TP", symbol=active_symbol,
+                        tp1_pct=round(tp1_dist/current_price*100, 4), min_pct=0.22)
                     signal = "NONE"
                 # Minimum R:R gate — reject entries where reward < 1.5× risk
                 MIN_ENTRY_RR = 1.5
                 pre_rr = tp1_dist / stop_d if stop_d else 0
                 if signal == "BUY" and pre_rr < MIN_ENTRY_RR:
                     push_log(f"[SKIP] {active_symbol} R:R {pre_rr:.2f}x < {MIN_ENTRY_RR} minimum — skipping entry")
+                    log("AGENT", "GATE_BLOCK_RR", symbol=active_symbol,
+                        rr=round(pre_rr, 3), min_rr=MIN_ENTRY_RR,
+                        stop_d=round(stop_d, 6), tp1_d=round(tp1_dist, 6))
                     signal = "NONE"
-                # Fear & Greed gate — only block in Extreme Fear (< 20), not regular Fear
+                # Fear & Greed gate — block only full-panic levels (< 10).
+                # size_multiplier() already halves positions at F&G ≤ 15, so 10-19 is
+                # covered by sizing. Blocking at < 20 was also catching recovery bounces
+                # that fire precisely when sentiment is at extreme-fear lows.
                 _fg_val = fear_greed.get("value", 50) if fear_greed else 50
-                if signal == "BUY" and _fg_val < 20:
-                    push_log(f"[SKIP] {active_symbol} Fear&Greed={_fg_val} (Extreme Fear) — no new longs")
+                if signal == "BUY" and _fg_val < 10:
+                    push_log(f"[SKIP] {active_symbol} Fear&Greed={_fg_val} (full panic) — no new longs")
+                    log("AGENT", "GATE_BLOCK_FG", symbol=active_symbol, fg=_fg_val)
                     signal = "NONE"
                 # ATR cap: reject extremely volatile coins — the same volatility that scores them
                 # high will blow through stops on normal noise (FIDA: 4.1% ATR → stop hit -11%)
@@ -868,6 +1028,23 @@ async def main_loop():
                 if signal == "BUY" and atr_pct_live > MAX_ENTRY_ATR_PCT:
                     push_log(f"[SKIP] {active_symbol} ATR {atr_pct_live:.2f}% > {MAX_ENTRY_ATR_PCT}% cap — too volatile to enter safely")
                     signal = "NONE"
+                # NN confirmation gate.  Only enforce when training accuracy > 57%:
+                # at ≤57% the model is near-random on this coin's data and the gate
+                # would incorrectly block valid rule-engine entries.
+                _nn_gate_active = predictor.is_trained and predictor.train_acc > 0.57
+                if signal == "BUY" and _nn_gate_active and _nn_prob < predictor.conf_floor:
+                    push_log(f"[NN] {active_symbol} up={_nn_prob:.1%} "
+                             f"< {predictor.conf_floor:.0%} floor — entry blocked "
+                             f"(model acc={predictor.train_acc*100:.1f}%)")
+                    log("NN", "GATE_BLOCK", symbol=active_symbol,
+                        prob=round(_nn_prob, 3), floor=predictor.conf_floor,
+                        train_acc=round(predictor.train_acc, 3))
+                    signal = "NONE"
+                elif signal == "BUY":
+                    _gate_note = (f"acc={predictor.train_acc*100:.1f}% active"
+                                  if _nn_gate_active else "gate bypassed (model near-random)")
+                    push_log(f"[NN] {active_symbol} up={_nn_prob:.1%} — entry confirmed "
+                             f"({_gate_note})")
 
             if signal == "BUY" and not em.positions:
                 # Last-second pool check — another agent may have just entered this coin
@@ -876,8 +1053,13 @@ async def main_loop():
                     signal = "NONE"
 
             if signal == "BUY" and not em.positions:
-                usdt_equiv, base_bal, raw_usdt = await om.get_balances_raw(active_symbol)
-                equity = usdt_equiv + base_bal * current_price  # full equity (includes BTC)
+                try:
+                    usdt_equiv, base_bal, raw_usdt = await om.get_balances_raw(active_symbol)
+                    equity = usdt_equiv + base_bal * current_price  # full equity (includes BTC)
+                except Exception as _bal_err:
+                    log("AGENT", "BALANCE_FETCH_FAILED_SIZING", error=str(_bal_err)[:160])
+                    await _cycle_sleep()
+                    continue
                 stop_d      = indicators["atr14"] * cfg.ATR_STOP_MULT
                 pool_budget = _ep.get_budget(_agent_slot, equity)
                 qty    = PositionSizer.calculate(equity, current_price, stop_d, size_mult,
@@ -973,9 +1155,9 @@ async def main_loop():
                     push_log(f"[SELECT] Firing for slot {_agent_slot} | excluded={sorted(_hard_excl)} | candidates={[c['symbol'] for c in _sel_candidates[:5]]}")
 
                     if not _sel_candidates:
-                        push_log(f"[SELECT] No candidates after exclusion — will retry in 15m")
+                        push_log(f"[SELECT] No candidates yet (scanner still warming up) — retry in 2m")
                         _ai_sel_triggered  = False
-                        _ai_sel_pending_ts = _time.time() + 900
+                        _ai_sel_pending_ts = _time.time() + 120
                     else:
                         try:
                             _sel_result = await selector.select(
