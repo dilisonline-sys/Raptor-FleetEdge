@@ -55,8 +55,8 @@ Each agent runs an independent `agent.py` process. The manager proxy forwards `/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/dilisonline-sys/dipu-agent.git
-cd dipu-agent   # repository folder name unchanged
+git clone https://github.com/dilisonline-sys/Raptor-FleetEdge.git
+cd Raptor-FleetEdge
 ```
 
 ### 2. Create your `.env` file
