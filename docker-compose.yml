@@ -8,7 +8,7 @@ services:
       # Agent manager + all spawned sub-agents write logs here.
       # Override any individual var by adding it to .env
       AGENT_NAME: raptor
-      TZ: Asia/Dubai
+      TZ: ${TZ:-Asia/Dubai}
     ports:
       - "7430:7430"   # agent manager dashboard
       - "7432:7432"   # testnet agent
