@@ -47,6 +47,8 @@ class MarketData:
                                 "price":       float(d["c"]),
                                 "volume_usdt": float(d["q"]),
                                 "change_pct":  float(d["P"]),
+                                "high":        float(d["h"]),
+                                "low":         float(d["l"]),
                             }
                         elif msg.type in (
                             aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR
@@ -121,6 +123,8 @@ class MarketData:
             "price":       float(data["lastPrice"]),
             "volume_usdt": float(data["quoteVolume"]),
             "change_pct":  float(data["priceChangePercent"]),
+            "high":        float(data["highPrice"]),
+            "low":         float(data["lowPrice"]),
         }
 
     async def get_orderbook(self) -> dict:
