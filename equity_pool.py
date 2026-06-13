@@ -28,13 +28,12 @@ def _read() -> dict:
 
 
 def _write(state: dict):
+    # C-3: write to a temp file then atomically replace — prevents concurrent readers
+    # seeing a truncated pool file between open("w") and the first json.dump byte.
     try:
-        with open(POOL_FILE, "w") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                json.dump(state, f, indent=2)
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+        _tmp = POOL_FILE.with_suffix(".tmp")
+        _tmp.write_text(json.dumps(state, indent=2))
+        _tmp.replace(POOL_FILE)   # atomic on Linux (same filesystem)
     except Exception:
         pass
 

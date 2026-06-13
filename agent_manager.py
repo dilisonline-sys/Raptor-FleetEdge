@@ -1079,7 +1079,7 @@ class AgentManager:
                         data["slots"][slot]["port"]       = info["port"]
             return web.json_response(data)
         except Exception:
-            return web.json_response({"slots": {str(i): None for i in range(4)}, "ts": 0})
+            return web.json_response({"slots": {str(i): None for i in range(5)}, "ts": 0})
 
     async def _do_spawn_fleet(self) -> dict:
         """Fetch top 4 coins by 1h momentum and spawn live agents for empty slots.
@@ -1106,7 +1106,7 @@ class AgentManager:
                     vol = float(t["quoteVolume"])
                     if vol < 15_000_000: continue
                     price = float(t["lastPrice"])
-                    if price < 0.05: continue
+                    if price < 0.50: continue
                     bid   = float(t.get("bidPrice") or price)
                     ask   = float(t.get("askPrice") or price)
                     mid   = (bid+ask)/2
@@ -1143,8 +1143,10 @@ class AgentManager:
             print(f"[manager] fleet coin fetch failed: {e} — using fallback")
             top4 = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]
 
-        # Slot 0 is permanently BTC; fill the other 3 from top momentum picks (excluding BTC)
-        top3_others = [s for s in top4 if s != "BTCUSDT"][:3]
+        # H-4: ema_sym (ETHUSDT) is reserved for slot 4 — exclude from momentum slots 1-3
+        ema_sym     = "ETHUSDT"
+        # Slot 0 is permanently BTC; fill the other 3 from top momentum picks (excluding BTC + ETHUSDT)
+        top3_others = [s for s in top4 if s != "BTCUSDT" and s != ema_sym][:3]
         while len(top3_others) < 3:
             top3_others.append("ETHUSDT")
         top4 = ["BTCUSDT"] + top3_others

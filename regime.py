@@ -14,7 +14,7 @@ class RegimeClassifier:
     def classify(self, ind: dict, atr_20bar_avg: float | None = None) -> str:
         e9, e21, e50 = ind["ema9"], ind["ema21"], ind["ema50"]
         atr          = ind["atr14"]
-        price        = ind.get("vwap", e21)
+        price        = ind.get("close", ind.get("vwap", e21))
         vol_ratio    = atr / price if price else 0
 
         # Volatile first — override everything

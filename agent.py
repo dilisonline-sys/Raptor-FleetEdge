@@ -33,7 +33,7 @@ import equity_pool as _ep
 import ema_cross_module as _ema_cross
 from rule_analyst import RuleAnalyst
 from rule_coin_selector import RuleCoinSelector
-from nn_predictor import PricePredictor
+from nn_predictor import PricePredictor, OOS_MIN_ACC, OOS_MIN_SAMP
 
 
 # ── Position persistence ──────────────────────────────────────────────────
@@ -358,7 +358,9 @@ async def main_loop():
     asyncio.create_task(_equity_pusher())
 
     async def _background_scanner():
-        """Independent background task — re-ranks all coins every 60s regardless of cycle."""
+        """Independent background task — re-ranks all coins every SCAN_INTERVAL seconds.
+        L-3: sleep 270s (just under the 300s prompt-cache TTL) instead of 60s to avoid
+        firing 5× redundant scans within one SCAN_INTERVAL and burning API rate limit."""
         await asyncio.sleep(10)  # let agent settle first
         while True:
             try:
@@ -385,7 +387,7 @@ async def main_loop():
                 return
             except Exception as e:
                 log("SCANNER", "BG_ERROR", error=str(e)[:80])
-            await asyncio.sleep(60)
+            await asyncio.sleep(270)
 
     # FIX-13: EMA cross is locked to one coin and never rotates — scanner wastes API rate limit
     if _strategy != "ema_cross":
@@ -519,7 +521,9 @@ async def main_loop():
                     push_log(f"[ORPHAN_SWEEP] Slot {_agent_slot}: found BTC (${_val:.2f}) — selling (slot 0 owns BTC)")
                     log("AGENT", "ORPHAN_BTC_SELL", slot=_agent_slot, qty=round(_qty, 6), usdt_val=round(_val, 2))
                     try:
-                        _tick_btc = await om.get_lot_step("BTCUSDT")
+                        # C-2: build a proper tick dict from _held["price"] — get_lot_step returns
+                        # a float (step size), not a tick dict, which would cause TypeError in submit()
+                        _tick_btc = {"price": _held["price"], "spread_pct": 0}
                         await om.submit("SELL", _qty, _tick_btc, {}, symbol="BTCUSDT")
                     except Exception as _btc_sell_e:
                         log("AGENT", "ORPHAN_BTC_SELL_ERROR", error=str(_btc_sell_e)[:80])
@@ -604,6 +608,16 @@ async def main_loop():
                         cfg.USE_TESTNET   = new_mode == "testnet"
                         cfg.USE_DEMO      = new_mode == "demo"
                         cfg.USE_LIVE      = new_mode == "live"
+                        # C-5: reload API credentials for the new mode from env
+                        _key_map = {
+                            "testnet": ("BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_API_SECRET"),
+                            "demo":    ("BINANCE_DEMO_API_KEY",    "BINANCE_DEMO_API_SECRET"),
+                            "live":    ("BINANCE_LIVE_API_KEY",    "BINANCE_LIVE_API_SECRET"),
+                        }
+                        _k, _s = _key_map[new_mode]
+                        cfg.BINANCE_API_KEY    = os.environ.get(_k, "")
+                        cfg.BINANCE_API_SECRET = os.environ.get(_s, "")
+                        await om.reset_session()
                         update_state(trading_mode=new_mode)
                         push_log(f"[MODE_SWITCH] → {new_mode.upper()} | {ep[0]}")
                         log("AGENT", "MODE_SWITCH", mode=new_mode, url=ep[0])
@@ -641,7 +655,7 @@ async def main_loop():
                     push_log("[FORCE_BTC] Queued — will close position and switch to BTCUSDT (locked)")
                     log("AGENT", "FORCE_BTC_QUEUED", current=active_symbol)
                 elif action == "RESET_DAY_START":
-                    _raw_reset = await om.get_balances_raw(cfg.SYMBOL)
+                    _raw_reset = await om.get_balances_raw(active_symbol)
                     _reset_eq  = _raw_reset[0] if _raw_reset else equity
                     risk.day_start_equity   = _reset_eq
                     risk.month_start_equity = _reset_eq
@@ -721,6 +735,7 @@ async def main_loop():
                         push_log(f"[ROTATE] Gate fail ×{gate_fail_streak} on {active_symbol} → {_gf_sym}")
                         log("AGENT", "COIN_ROTATE_GATE_FAIL",
                             from_=active_symbol, to=_gf_sym, streak=gate_fail_streak)
+                        scanner._health.invalidate(active_symbol)  # M-6: clear stale health cache
                         await md.close()
                         active_symbol = _gf_sym
                         md = MarketData(active_symbol, cfg.INTERVAL)
@@ -861,6 +876,7 @@ async def main_loop():
                         log("AGENT", "COIN_ROTATE", from_=active_symbol, to=_rot_sym,
                             reason=f"{regime.lower()}×{none_signal_streak}")
                         await _liquidate_before_switch(active_symbol)
+                        scanner._health.invalidate(active_symbol)  # M-6: clear stale health cache
                         await md.close()
                         active_symbol = _rot_sym
                         md = MarketData(active_symbol, cfg.INTERVAL)
@@ -918,6 +934,8 @@ async def main_loop():
                             push_log(f"[TP1_EXECUTED] SELL {active_symbol} qty={round(sell_qty,6)} @ ~{current_price:.4f}")
                             asyncio.create_task(asyncio.to_thread(
                                 _email.notify_fill, _agent_name, active_symbol, "SELL (TP1)", sell_qty, current_price))
+                            # M-5: record partial-close P&L against the risk engine
+                            risk.record_trade(trade_pnl, equity)
                 elif act.startswith("PARTIAL_CLOSE:BUY:TP2"):
                     base_bal = await om.get_base_balance(active_symbol)
                     # NC-1: after TP1, base_bal is (1-TP1_PCT) of original.
@@ -930,6 +948,19 @@ async def main_loop():
                             push_log(f"[TP2_EXECUTED] SELL {active_symbol} qty={round(sell_qty,6)} @ ~{current_price:.4f}")
                             asyncio.create_task(asyncio.to_thread(
                                 _email.notify_fill, _agent_name, active_symbol, "SELL (TP2)", sell_qty, current_price))
+                            # M-5: record partial-close P&L against the risk engine
+                            risk.record_trade(trade_pnl, equity)
+                elif act.startswith("PARTIAL_CLOSE:BUY:TP3"):
+                    # H-2: sell remaining position at TP3 (~34% of original after TP1+TP2)
+                    base_bal = await om.get_base_balance(active_symbol)
+                    if base_bal > 0:
+                        tp_order = await om.submit("SELL", base_bal, tick, indicators,
+                                                   symbol=active_symbol)
+                        if tp_order:
+                            push_log(f"[TP3_EXECUTED] SELL {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
+                            asyncio.create_task(asyncio.to_thread(
+                                _email.notify_fill, _agent_name, active_symbol, "SELL (TP3)", base_bal, current_price))
+                            risk.record_trade(trade_pnl, equity)
 
             # Update open position overlay
             if em.positions:
@@ -1030,6 +1061,7 @@ async def main_loop():
                         from_=active_symbol, to=_rot_sym, reason=_reason)
                     if _agent_slot != 0:
                         await _liquidate_before_switch(active_symbol)
+                    scanner._health.invalidate(active_symbol)  # M-6: clear stale health cache
                     await md.close()
                     active_symbol = _rot_sym
                     md = MarketData(active_symbol, cfg.INTERVAL)
@@ -1095,10 +1127,12 @@ async def main_loop():
             # failures that make equity appear low when no trade occurred.
             _full_close_pnl  = sum(pnl for act, pnl in exit_actions if act.startswith("CLOSE:"))
             _had_full_close  = any(act.startswith("CLOSE:") for act, _ in exit_actions)
+            _post_close_equity_fetched = False
             if exit_actions and not em.positions:
                 try:
                     _post_close_equity = await om.get_equity(symbol=active_symbol, price=current_price)
                     risk.update_metrics(_post_close_equity)
+                    _post_close_equity_fetched = True
                     # Fix-2 gap: call record_trade for every full close including breakeven (pnl==0)
                     if _had_full_close:
                         risk.record_trade(_full_close_pnl, _post_close_equity)
@@ -1204,7 +1238,6 @@ async def main_loop():
                     signal = "NONE"
                 # NH-2: gate activates only when OOS accuracy ≥ 58% AND test set ≥ 50 samples.
                 # NM-3: predictor is None for ema_cross — gate is always inactive, entry allowed.
-                from nn_predictor import OOS_MIN_ACC, OOS_MIN_SAMP
                 _nn_gate_active = (predictor is not None
                                    and predictor.is_trained
                                    and predictor.oos_acc >= OOS_MIN_ACC
@@ -1235,13 +1268,8 @@ async def main_loop():
                     signal = "NONE"
 
             if signal == "BUY" and not em.positions:
-                try:
-                    usdt_equiv, base_bal, raw_usdt = await om.get_balances_raw(active_symbol)
-                    equity = usdt_equiv + base_bal * current_price  # full equity (includes BTC)
-                except Exception as _bal_err:
-                    log("AGENT", "BALANCE_FETCH_FAILED_SIZING", error=str(_bal_err)[:160])
-                    await _cycle_sleep()
-                    continue
+                # H-1: reuse usdt_equiv/base_bal/raw_usdt from the first get_balances_raw() call
+                # above (lines ~1155). No trade occurred between the two blocks — values are fresh.
                 stop_d      = indicators["atr14"] * cfg.ATR_STOP_MULT
                 pool_budget = _ep.get_budget(_agent_slot, equity)
                 log("AGENT", "SIZING_PRE",
@@ -1292,7 +1320,9 @@ async def main_loop():
             # Use background-task cached values — avoids a duplicate REST call per cycle.
             # _state["equity"] is kept current by _equity_pusher every second.
             equity = _state.get("equity") or (_raw_usdt_cache[0] + _base_cache[0] * current_price)
-            risk.update_metrics(equity)
+            # M-7: skip if update_metrics already ran with fresh post-close equity this cycle
+            if not _post_close_equity_fetched:
+                risk.update_metrics(equity)
             import portfolio_tracker as _pt
             _pf = _pt.get_portfolio_state()
             _unrealized_pnl = sum(
@@ -1376,6 +1406,7 @@ async def main_loop():
                                         confidence=_rec["confidence"], est_rr=_rec.get("est_rr"))
                                     if _sel_sym != active_symbol:
                                         await _liquidate_before_switch(active_symbol)
+                                        scanner._health.invalidate(active_symbol)  # M-6: clear stale health cache
                                         await md.close()
                                         active_symbol = _sel_sym
                                         md = MarketData(active_symbol, cfg.INTERVAL)

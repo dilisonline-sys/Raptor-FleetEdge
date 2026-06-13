@@ -102,14 +102,14 @@ CANDLE_LIMIT = 200
 #                   total_equity × MAX_EXPOSURE  − other_open     ← pool headroom
 #               )
 SHARED_EQUITY_MODE = True
-FLEET_SIZE         = int(os.environ.get("DIPU_FLEET_SIZE", 4))
+FLEET_SIZE         = int(os.environ.get("DIPU_FLEET_SIZE", 5))
 
 # ── Per-mode risk parameters (testnet == demo; live can differ) ──
 _RISK = {
     #              risk_pct  max_trade  exposure  leverage  daily_dd  monthly_dd  consec_loss
     "testnet": (   0.02,     0.08,      0.30,     3,        0.10,     0.15,       3 ),
     "demo":    (   0.02,     0.08,      0.30,     3,        0.10,     0.15,       3 ),
-    "live":    (   0.10,     0.70,      0.70,     3,        0.10,     0.15,       3 ),
+    "live":    (   0.01,     0.15,      0.40,     3,        0.10,     0.15,       3 ),
 }
 (RISK_PCT, MAX_TRADE_PCT, MAX_EXPOSURE, MAX_LEVERAGE,
  DAILY_DD_LIMIT, MONTHLY_DD_LIMIT, MAX_CONSEC_LOSS) = _RISK[TRADING_MODE]
