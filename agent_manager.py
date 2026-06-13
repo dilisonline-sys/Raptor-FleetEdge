@@ -46,7 +46,19 @@ _ENV_ALLOWED = frozenset({
     "DIPU_ALERT_WEBHOOK",      "DIPU_AUTHORIZED_AGENT_TOKENS",
     "TZ",
 })
-_ENV_SENSITIVE = frozenset({"SECRET", "KEY", "TOKEN"})
+_ENV_SENSITIVE    = frozenset({"SECRET", "KEY", "TOKEN"})
+_MODE_KEY_PREFIX  = {"testnet": "BINANCE_TESTNET", "demo": "BINANCE_DEMO", "live": "BINANCE_LIVE"}
+
+
+def _api_keys_set(mode: str) -> bool:
+    prefix = _MODE_KEY_PREFIX.get(mode)
+    if not prefix:
+        return False
+    env = _env_read()
+    return bool(
+        env.get(f"{prefix}_API_KEY", "").strip() and
+        env.get(f"{prefix}_API_SECRET", "").strip()
+    )
 
 
 def _env_is_sensitive(key: str) -> bool:
@@ -612,7 +624,7 @@ async function stopAgent(name) {
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({name}),
   });
-  loadAgents();
+  loadAgents(); loadPool();
 }
 
 async function startAgent(name, mode, port, symbol) {
@@ -710,9 +722,13 @@ async function spawnFleet() {
   try {
     const r = await fetch('/api/spawn-fleet', {method:'POST'});
     const d = await r.json();
-    const ok = d.agents.filter(a => a.status === 'spawned').length;
-    const skip = d.agents.filter(a => a.status === 'already_running').length;
-    msg.textContent = `✓ Fleet launched — ${ok} spawned, ${skip} already running | top4: ${d.top4.join(', ')}`;
+    if (!d.ok && d.error) {
+      msg.textContent = '✗ ' + d.error;
+    } else {
+      const ok   = d.agents.filter(a => a.status === 'spawned').length;
+      const skip = d.agents.filter(a => a.status === 'already_running').length;
+      msg.textContent = `✓ Fleet launched — ${ok} spawned, ${skip} already running | top4: ${(d.top4||[]).join(', ')}`;
+    }
   } catch(e) {
     msg.textContent = '✗ Fleet launch failed: ' + e.message;
   }
@@ -946,6 +962,8 @@ class AgentManager:
             return web.json_response({"error": "name required"}, status=400)
         if mode not in MODE_META:
             return web.json_response({"error": f"unknown mode: {mode}"}, status=400)
+        if not _api_keys_set(mode):
+            return web.json_response({"error": f"No API credentials set for {mode} mode — configure them in Settings first."}, status=400)
         if name in _agents and _pid_alive(_agents[name].get("pid", 0)):
             return web.json_response({"error": f"{name} already running"}, status=409)
 
@@ -1045,6 +1063,9 @@ class AgentManager:
         Returns the result dict used by both the HTTP handler and the auto-spawn
         scheduler so the logic lives in exactly one place.
         """
+        if not _api_keys_set("live"):
+            return {"ok": False, "agents": [], "top4": [],
+                    "error": "No live API credentials configured — go to Settings and enter your Binance Live API Key and Secret, then restart."}
         import json as _j, urllib.parse as _up, aiohttp as _aio
         try:
             async with _aio.ClientSession() as s:
@@ -1131,6 +1152,9 @@ class AgentManager:
         Skips if agents are already running (e.g. hot-restart with live PIDs).
         """
         await asyncio.sleep(5)
+        if not _api_keys_set("live"):
+            print("[manager] auto-spawn skipped — no live API credentials in .env (configure via Settings)")
+            return
         # Check whether any live slot is already occupied
         live_running = any(
             info.get("mode") == "live" and _pid_alive(info.get("pid", 0))
