@@ -13,7 +13,11 @@ services:
       - "7430:7430"   # agent manager dashboard
       - "7432:7432"   # testnet agent
       - "7433:7433"   # demo agent
-      - "7434:7434"   # live agent
+      - "7434:7434"   # live agent slot 0
+      - "7435:7435"   # live agent slot 1
+      - "7436:7436"   # live agent slot 2
+      - "7437:7437"   # live agent slot 3
+      - "7438:7438"   # live agent slot 4 (EMA Cross)
     volumes:
       - rfe_logs:/tmp
       - ./.env:/app/.env

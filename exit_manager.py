@@ -151,6 +151,9 @@ class ExitManager:
                 hit = (pos.side == "BUY" and current_price >= pos.tp2) or \
                       (pos.side == "SELL" and current_price <= pos.tp2)
                 if hit:
+                    # FIX-15: frac adjusts for already-reduced pos.qty so TP2 sells exactly
+                    # cfg.TP2_PCT (33%) of the ORIGINAL position:
+                    # original_qty × (1 - TP1_PCT) × [TP2_PCT / (1 - TP1_PCT)] = original_qty × TP2_PCT
                     frac        = cfg.TP2_PCT / (1 - cfg.TP1_PCT)
                     sold_qty    = pos.qty * frac
                     tp2_pnl     = (current_price - pos.avg_entry) * sold_qty * direction

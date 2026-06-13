@@ -21,7 +21,8 @@ class RiskEngine:
         if self.halt_flag and time.time() < self.halt_until:
             return True
         if self.halt_flag and time.time() >= self.halt_until:
-            self.halt_flag = False
+            self.halt_flag    = False
+            self.consec_losses = 0   # NC-2: reset streak so next loss doesn't immediately re-halt
             log("MODULE_7", "HALT_LIFTED")
         return False
 
@@ -80,9 +81,9 @@ class RiskEngine:
             monthly_dd=round(monthly_dd * 100, 2),
             consec_losses=self.consec_losses)
 
-    async def emergency_halt(self, om, reason: str, equity: float):
+    async def emergency_halt(self, om, reason: str, equity: float, symbol: str | None = None):
         log("MODULE_7", "EMERGENCY_HALT", reason=reason, equity=round(equity, 2))
-        await om.cancel_all()
+        await om.cancel_all(symbol=symbol)  # FIX-1: pass active symbol so correct pair is cancelled
         self._set_halt(4, reason, equity)
         if cfg.ALERT_WEBHOOK:
             await self._send_alert(reason, equity)
