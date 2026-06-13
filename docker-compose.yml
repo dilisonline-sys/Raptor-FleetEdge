@@ -8,6 +8,7 @@ services:
       # Agent manager + all spawned sub-agents write logs here.
       # Override any individual var by adding it to .env
       AGENT_NAME: raptor
+      TZ: Asia/Dubai
     ports:
       - "7430:7430"   # agent manager dashboard
       - "7432:7432"   # testnet agent
@@ -16,6 +17,8 @@ services:
     volumes:
       - rfe_logs:/tmp
       - ./.env:/app/.env
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7430/api/agents')"]
       interval: 30s
