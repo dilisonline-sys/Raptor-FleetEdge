@@ -88,7 +88,7 @@ table{width:100%;border-collapse:collapse;font-size:.73rem;margin-bottom:20px}
 thead th{background:#111;color:#fff;font-size:.65rem;text-transform:uppercase;letter-spacing:.07em;padding:7px 9px;border-bottom:1px solid #1e1e1e;text-align:left}
 tbody tr{border-bottom:1px solid #141414}
 tbody tr:hover{background:#111}
-td{padding:6px 9px;vertical-align:middle}
+td{padding:6px 9px;vertical-align:middle;color:#fff}
 td.buy{color:#00e676;font-weight:bold}
 td.sell{color:#ff1744;font-weight:bold}
 td.close{color:#fff}
