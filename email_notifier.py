@@ -1,4 +1,4 @@
-"""Email notification module for dipu trading alerts and P&L reports."""
+"""Email notification module for Raptor FleetEdge trading alerts and P&L reports."""
 import json
 import os
 import smtplib
@@ -7,7 +7,7 @@ import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-EMAIL_CONFIG_FILE = "/tmp/dipu_email_config.json"
+EMAIL_CONFIG_FILE = "/tmp/rfe_email_config.json"
 
 _DEFAULT_CONFIG: dict = {
     "enabled": False,
@@ -124,7 +124,7 @@ def notify_fill(agent_name: str, symbol: str, side: str, qty: float, price: floa
         {_row("Value",  f"${value:.2f}")}
         {_row("Time",   _ts(), "#777")}
       </table>""")
-    ok, _ = _send(f"[dipu] {agent_name}: {side} {symbol} {qty:.4f} @ ${price:.5f}", html)
+    ok, _ = _send(f"[Raptor FleetEdge] {agent_name}: {side} {symbol} {qty:.4f} @ ${price:.5f}", html)
     return ok
 
 
@@ -142,7 +142,7 @@ def notify_coin_traded(agent_name: str, symbol: str, regime: str, signal: str) -
         {_row("Signal", signal)}
         {_row("Time",   _ts(), "#777")}
       </table>""")
-    ok, _ = _send(f"[dipu] {agent_name}: now trading {symbol} ({regime})", html)
+    ok, _ = _send(f"[Raptor FleetEdge] {agent_name}: now trading {symbol} ({regime})", html)
     return ok
 
 
@@ -188,21 +188,21 @@ def send_pnl_report(slots_data: dict) -> bool:
         <span style="color:#fff">Total Daily P&amp;L:&nbsp;</span>
         <span style="color:{total_color};font-size:1.15em;font-weight:bold">{total_str}</span>
       </div>""")
-    ok, _ = _send(f"[dipu] 4h P&L Report — Total: {total_str}", html)
+    ok, _ = _send(f"[Raptor FleetEdge] 4h P&L Report — Total: {total_str}", html)
     return ok
 
 
 def send_test_email(recipient: str) -> tuple[bool, str]:
     """Returns (True, '') on success or (False, reason) on failure."""
     html = _style_wrap(f"""
-      <h2 style="color:#00e5ff;margin:0 0 14px">&#x2705; dipu email test</h2>
+      <h2 style="color:#00e5ff;margin:0 0 14px">&#x2705; Raptor FleetEdge email test</h2>
       <p style="color:#fff;margin:0 0 12px">Email notifications are working correctly.</p>
       <p style="color:#fff;font-size:12px">{_ts()}</p>""")
     cfg = load_config()
     original = cfg.get("recipient", "")
     cfg["recipient"] = recipient
     save_config(cfg)
-    ok, reason = _send("[dipu] Test email — notifications active", html)
+    ok, reason = _send("[Raptor FleetEdge] Test email — notifications active", html)
     cfg["recipient"] = original
     save_config(cfg)
     return ok, reason

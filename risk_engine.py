@@ -91,7 +91,7 @@ class RiskEngine:
         if not self._session:
             self._session = aiohttp.ClientSession()
         try:
-            payload = {"agent": "dipu", "reason": reason, "equity": equity}
+            payload = {"agent": "raptor-fleetedge", "reason": reason, "equity": equity}
             async with self._session.post(cfg.ALERT_WEBHOOK, json=payload) as r:
                 log("MODULE_7", "ALERT_SENT", status=r.status)
         except Exception as e:

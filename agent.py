@@ -1,12 +1,12 @@
 """
-dipu — Autonomous Crypto Trading Agent
+Raptor FleetEdge — Autonomous Crypto Trading Agent
 20 years experience | High-risk / High-reward mindset
 Binance Spot & USDT-M Futures
 
 Instruction sources: authorized external agents/bots via InstructionServer.
 The Binance login account is execution-only — it is NOT an instruction source.
 
-Dynamic symbol selection: dipu scans all USDT pairs every 15 minutes and
+Dynamic symbol selection: Raptor FleetEdge scans all USDT pairs every 15 minutes and
 switches to whichever coin offers the best profit potential per minute.
 """
 import asyncio
@@ -37,7 +37,7 @@ from nn_predictor import PricePredictor
 
 # ── Position persistence ──────────────────────────────────────────────────
 def _pos_file(slot: int) -> str:
-    return f"/tmp/dipu_positions_{slot}.json"
+    return f"/tmp/rfe_positions_{slot}.json"
 
 
 def _save_positions(slot: int, symbol: str, positions: list) -> None:
@@ -94,8 +94,8 @@ def _clear_positions_file(slot: int) -> None:
         pass
 
 
-DIPU_PERSONA = """
-I am dipu. Twenty years in crypto — lived through Mt. Gox, the ICO bubble,
+RAPTOR_PERSONA = """
+I am Raptor FleetEdge. Twenty years in crypto — lived through Mt. Gox, the ICO bubble,
 three Bitcoin halvings, the DeFi summer, and the FTX collapse.
 I don't chase pumps and I don't panic-sell. Every trade has a thesis,
 a defined risk, and a target. I size big when the setup is pristine
@@ -203,7 +203,7 @@ async def _run_analyst(analyst, symbol, price, indicators, candles, regime, fear
 
 
 async def main_loop():
-    log("AGENT", "STARTUP", persona=DIPU_PERSONA.strip())
+    log("AGENT", "STARTUP", persona=RAPTOR_PERSONA.strip())
 
     scanner  = MarketScanner()
     risk     = RiskEngine()
@@ -216,7 +216,7 @@ async def main_loop():
     predictor = PricePredictor()
     queue       = asyncio.Queue()
     _agent_slot = int(os.environ.get("AGENT_SLOT", "0"))
-    _agent_name = os.environ.get("AGENT_NAME", f"dipu-slot{_agent_slot}")
+    _agent_name = os.environ.get("AGENT_NAME", f"fleetedge{_agent_slot + 1}")
     _wake      = asyncio.Event()
     server     = InstructionServer(queue)
     set_wake_event(_wake)

@@ -8,8 +8,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-POOL_FILE      = Path("/tmp/dipu_equity_pool.json")
-DAY_START_FILE = Path("/tmp/dipu_portfolio_day.json")
+POOL_FILE      = Path("/tmp/rfe_equity_pool.json")
+DAY_START_FILE = Path("/tmp/rfe_portfolio_day.json")
 
 
 def get_portfolio_state() -> dict:

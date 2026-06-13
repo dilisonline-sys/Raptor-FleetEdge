@@ -5,13 +5,13 @@ import os
 import time
 from datetime import datetime, timezone
 
-LOG_PATTERN   = "/tmp/dipu_*.log"
+LOG_PATTERN   = "/tmp/rfe_*.log"
 RETAIN_HOURS  = 24
 
 
 def clean_logs() -> dict:
     """
-    Scan all /tmp/dipu_*.log files and drop any JSON-Lines entries older than
+    Scan all /tmp/rfe_*.log files and drop any JSON-Lines entries older than
     RETAIN_HOURS. Returns a summary dict for reporting.
     """
     cutoff   = time.time() - RETAIN_HOURS * 3600

@@ -1,5 +1,5 @@
 """
-Multi-agent instruction interface for dipu.
+Multi-agent instruction interface for Raptor FleetEdge.
 """
 import asyncio
 import json
@@ -55,7 +55,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>dipu — trading agent</title>
+<title>Raptor FleetEdge — trading agent</title>
 <style>#sse-status{font-size:.7rem;margin-left:12px;vertical-align:middle}</style>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
@@ -624,7 +624,7 @@ function renderCards(s) {
 function renderTx(txs) {
   const wrap = document.getElementById('tx-wrap');
   if (!txs.length) {
-    wrap.innerHTML = '<p class="none">No transactions yet — dipu is scanning the market.</p>';
+    wrap.innerHTML = '<p class="none">No transactions yet — Raptor FleetEdge is scanning the market.</p>';
     return;
   }
   let rows = '';
@@ -701,7 +701,7 @@ function setEl(id, val) {
 // ── Market order buttons ──────────────────────────────────
 async function marketOrder(side) {
   const label = side === 'BUY' ? '▲ Market BUY' : '▼ Market SELL';
-  if (!confirm(`Send ${label} signal to dipu?\nThis will execute immediately at market price.`)) return;
+  if (!confirm(`Send ${label} signal to Raptor FleetEdge?\nThis will execute immediately at market price.`)) return;
   const r = await fetch('/instruction', {
     method: 'POST',
     headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
@@ -752,7 +752,7 @@ async function forceBTC() {
 // ── Stop / Resume buttons ─────────────────────────────────
 let _halted = false;
 async function stopAgent() {
-  if (!confirm('Stop dipu trading? (can resume without restart)')) return;
+  if (!confirm('Stop Raptor FleetEdge trading? (can resume without restart)')) return;
   await fetch('/instruction', {
     method:'POST',
     headers:{'Content-Type':'application/json','X-Agent-Token':'internal'},
@@ -926,11 +926,11 @@ function _applyTheme(theme) {
 function toggleTheme() {
   const cur = document.documentElement.getAttribute('data-theme') || 'night';
   const next = cur === 'day' ? 'night' : 'day';
-  localStorage.setItem('dipu-theme', next);
+  localStorage.setItem('rfe-theme', next);
   _applyTheme(next);
 }
 (function() {
-  const saved = localStorage.getItem('dipu-theme') || 'night';
+  const saved = localStorage.getItem('rfe-theme') || 'night';
   _applyTheme(saved);
 })();
 // ── Boot ──────────────────────────────────────────────────
@@ -1044,7 +1044,7 @@ class InstructionServer:
                 try:
                     import json as _j
                     from pathlib import Path as _P
-                    _pf = _P("/tmp/dipu_equity_pool.json")
+                    _pf = _P("/tmp/rfe_equity_pool.json")
                     if _pf.exists():
                         _state["pool_state"] = _j.loads(_pf.read_text())
                 except Exception:
@@ -1171,13 +1171,13 @@ class InstructionServer:
     async def _status(self, request: web.Request) -> web.Response:
         if not _auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
-        return web.json_response({"agent": "dipu", "status": "running"})
+        return web.json_response({"agent": "raptor-fleetedge", "status": "running"})
 
     async def _pool_state(self, request: web.Request) -> web.Response:
         import json as _j
         from pathlib import Path as _P
         try:
-            with open("/tmp/dipu_equity_pool.json") as f:
+            with open("/tmp/rfe_equity_pool.json") as f:
                 return web.json_response(_j.load(f))
         except Exception:
             return web.json_response({"slots": {str(i): None for i in range(4)}, "ts": 0})

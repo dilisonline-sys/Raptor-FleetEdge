@@ -1,6 +1,6 @@
 """
-dipu Agent Manager — port 7430
-Spawns, stops, and monitors independent dipu instances per trading mode.
+Raptor FleetEdge Agent Manager — port 7430
+Spawns, stops, and monitors independent Raptor FleetEdge instances per trading mode.
 Each instance gets its own port, name, log file, and dashboard.
 """
 import asyncio
@@ -15,9 +15,9 @@ import aiohttp
 from aiohttp import web
 
 MANAGER_PORT      = 7430
-STATE_FILE        = Path("/tmp/dipu_manager_state.json")
+STATE_FILE        = Path("/tmp/rfe_manager_state.json")
 AGENT_SCRIPT      = Path(__file__).parent / "agent.py"
-EMAIL_CONFIG_FILE = Path("/tmp/dipu_email_config.json")
+EMAIL_CONFIG_FILE = Path("/tmp/rfe_email_config.json")
 
 # mode → (default port, API label, badge colour)
 MODE_META = {
@@ -33,7 +33,7 @@ _agents: dict[str, dict] = {}
 _available_coins: list[str] = []
 BINANCE_PUBLIC = "https://api.binance.com"
 LIVE_PORTS  = {0: 7434, 1: 7435, 2: 7436, 3: 7437}  # slot → dashboard port
-POOL_FILE   = "/tmp/dipu_equity_pool.json"
+POOL_FILE   = "/tmp/rfe_equity_pool.json"
 COIN_BLACKLIST  = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT", "USDPUSDT"}
 
 
@@ -90,8 +90,8 @@ def _startup_cleanup():
       - all *.log files in /tmp — truncated to zero for a clean session
 
     Preserved:
-      - dipu_positions_<slot>.json — open position records for recovery
-      - dipu_email_config.json     — user email settings
+      - rfe_positions_<slot>.json — open position records for recovery
+      - rfe_email_config.json     — user email settings
     """
     _tmp = Path("/tmp")
 
@@ -100,10 +100,10 @@ def _startup_cleanup():
     pool.write_text(json.dumps({"slots": {}, "ts": 0, "usdt_free": 0, "earn_value": 0}))
 
     # Remove portfolio day baseline — portfolio_tracker will recreate it
-    (_tmp / "dipu_portfolio_day.json").unlink(missing_ok=True)
+    (_tmp / "rfe_portfolio_day.json").unlink(missing_ok=True)
 
-    # Truncate all dipu log files (preserves the file so tail -f keeps working)
-    for log_file in sorted(_tmp.glob("dipu_*.log")):
+    # Truncate all rfe log files (preserves the file so tail -f keeps working)
+    for log_file in sorted(_tmp.glob("rfe_*.log")):
         try:
             log_file.write_text("")
         except Exception:
@@ -148,7 +148,7 @@ def _agent_status(name: str) -> str:
 
 
 def _spawn(name: str, mode: str, port: int, symbol: str = "BTCUSDT", slot: int = 0) -> dict | None:
-    log_file = f"/tmp/dipu_{name}.log"
+    log_file = f"/tmp/rfe_{name}.log"
     env = {**os.environ,
            "TRADING_MODE":  mode,
            "AGENT_NAME":    name,
@@ -196,7 +196,7 @@ MANAGER_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>dipu — agent manager</title>
+<title>Raptor FleetEdge — Agent Manager</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#080808;color:#fff;font-family:'Courier New',monospace;padding:28px}
@@ -277,14 +277,14 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 </head>
 <body>
 <button id="theme-btn" onclick="toggleTheme()">☀ Day</button>
-<h1>&#9654; dipu — agent manager</h1>
-<div class="sub">Spawn and control independent dipu trading instances per environment</div>
+<h1>&#9654; Raptor FleetEdge — Agent Manager</h1>
+<div class="sub">Spawn and control independent Raptor FleetEdge trading instances per environment</div>
 
 <h2>&#9646; Spawn new agent</h2>
 <div class="spawn-form">
   <div class="field">
     <label>Agent name</label>
-    <input id="f-name" type="text" placeholder="dipu-demo" value="dipu-demo">
+    <input id="f-name" type="text" placeholder="rfe-demo" value="rfe-demo">
   </div>
   <div class="field">
     <label>Trading mode</label>
@@ -525,7 +525,7 @@ function renderFleet(pool) {
     const pnl  = s ? (s.daily_pnl||0) : 0;
     const pnlStr = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
     const pnlCls = pnl >= 0 ? 'g' : 'r';
-    const name   = i === 0 ? 'dipu-live' : 'dipu-live-' + i;
+    const name   = 'fleetedge' + (i + 1);
     if (s) {
       html += `<div class="slot-card live">
         <div class="slot-num">Slot ${i} &nbsp;&#9679;&nbsp; :${port}</div>
@@ -572,7 +572,7 @@ async function spawnFleet() {
 }
 
 async function spawnSlot(slot) {
-  const name = slot === 0 ? 'dipu-live' : 'dipu-live-' + slot;
+  const name = 'fleetedge' + (slot + 1);
   const port = [7434,7435,7436,7437][slot];
   const r = await fetch('/api/spawn-fleet', {method:'POST'});
   const d = await r.json();
@@ -677,11 +677,11 @@ function _applyTheme(theme) {
 function toggleTheme() {
   const cur = document.documentElement.getAttribute('data-theme') || 'night';
   const next = cur === 'day' ? 'night' : 'day';
-  localStorage.setItem('dipu-theme', next);
+  localStorage.setItem('rfe-theme', next);
   _applyTheme(next);
 }
 (function() {
-  const saved = localStorage.getItem('dipu-theme') || 'night';
+  const saved = localStorage.getItem('rfe-theme') || 'night';
   _applyTheme(saved);
 })();
 </script>
@@ -901,7 +901,7 @@ class AgentManager:
         spawned = []
         for slot, sym in enumerate(top4):
             port = LIVE_PORTS[slot]
-            name = f"dipu-live-{slot}" if slot > 0 else "dipu-live"
+            name = f"fleetedge{slot + 1}"
             if name in _agents and _pid_alive(_agents[name].get("pid", 0)):
                 spawned.append({"slot": slot, "name": name, "status": "already_running", "symbol": _agents[name].get("symbol","")})
                 continue
@@ -1032,7 +1032,7 @@ class AgentManager:
             await asyncio.sleep(INTERVAL)
 
     async def _log_cleaner_scheduler(self):
-        """Trim all dipu log files to the last 24 hours, every 6 hours."""
+        """Trim all rfe log files to the last 24 hours, every 6 hours."""
         INTERVAL = 6 * 3600
         await asyncio.sleep(60)  # brief startup delay — let agents write their first lines
         while True:
