@@ -15,7 +15,11 @@ class RegimeClassifier:
         spike = (atr / atr_20bar_avg) > 2 if atr_20bar_avg else False
         if vol_ratio > 0.05 or spike:
             regime = "VOLATILE"
-        elif e9 > e21 > e50 or e9 < e21 < e50:
+        elif (e9 > e21 and e9 > e50) or (e9 < e21 and e9 < e50):
+            # TRENDING: EMA9 must agree with EMA50 direction AND lead EMA21.
+            # This captures early trends where EMA21 hasn't yet crossed EMA50
+            # (the most profitable entry zone) without requiring perfect stack alignment.
+            # Strict stack (e9>e21>e50) is a special case that always satisfies this.
             regime = "TRENDING"
         else:
             regime = "RANGING"
