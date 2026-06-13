@@ -14,15 +14,18 @@ import pandas as pd
 import pandas_ta as ta
 from logger import log
 import config as cfg
+from coin_health import CoinHealthFilter
 
 SCAN_INTERVAL   = 300        # re-rank every 5 minutes (matches cycle)
 MIN_VOLUME_USDT = 15_000_000 # $15M 24h volume — filters out micro-caps that spike and reverse
-MIN_PRICE       = 0.05       # reject sub-$0.05 coins — poor spread behaviour under $0.05
-MIN_PRICE_CHG   = 1.0        # need at least 1% move — momentum only
+MIN_PRICE       = 0.50       # Solution 2: raised from $0.05 to $0.50 — sub-$0.50 coins have
+                             # tick sizes that eat into the 0.15% fee break-even threshold
+MIN_PRICE_CHG   = 0.5        # Solution 4: raised from 1.0 to 0.5% for 1h filter step;
+                             # actual 1h momentum check uses chg_1h >= 0.5 below
 MAX_SPREAD_PCT  = 0.30       # raised — low-price coins (e.g. $0.30) hit 0.29% spread on 1 tick
 TOP_N           = 12         # score top 12 candidates with indicators
 BLACKLIST       = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT",
-                   "USD1USDT", "USDTUSDT"}  # stablecoins + tether pairs
+                   "USD1USDT", "USDTUSDT", "XPLUSDT"}  # stablecoins + structural fee traps
 
 def _is_valid_symbol(sym: str) -> bool:
     """Reject non-ASCII symbols (promotional/meme tokens like 币安人生USDT)."""
@@ -35,6 +38,7 @@ class MarketScanner:
         self.best_symbol   = cfg.SYMBOL
         self.ranked: list[dict] = []
         self._last_scan    = 0.0
+        self._health       = CoinHealthFilter()
 
     async def _ensure_session(self):
         if not self._session or self._session.closed:
@@ -75,7 +79,8 @@ class MarketScanner:
                     continue
                 chg_24h = abs(float(t.get("priceChangePercent", 0)))
                 pre.append({"symbol": sym, "price": price, "spread_pct": spread_pct,
-                             "vol_24h": vol, "chg_24h": chg_24h})
+                             "vol_24h": vol, "chg_24h": chg_24h,
+                             "_ticker24h": t})  # kept for health check reuse
             except (ValueError, KeyError):
                 continue
 
@@ -122,8 +127,11 @@ class MarketScanner:
                 high_1h = float(t1h["highPrice"])
                 low_1h  = float(t1h["lowPrice"])
                 price   = float(t1h["lastPrice"]) or c["price"]
-                # Require at least 0.3% 1h move and $500K 1h volume
-                if chg_1h < 0.3 or vol_1h < 500_000:
+                # Solution 4: require at least 0.5% 1h move (raised from 0.3%).
+                # 0.15% fee break-even × 3 safety margin = 0.45% → rounded to 0.5%.
+                # Coins with <0.5% 1h move rarely generate enough per-candle movement
+                # to reach TP1 before the 2h time-exit triggers.
+                if chg_1h < 0.5 or vol_1h < 500_000:
                     continue
                 range_1h    = (high_1h - low_1h) / price if price else 0
                 quick_score = chg_1h * (vol_1h / 1e7) * range_1h
@@ -144,8 +152,8 @@ class MarketScanner:
             top3=[c["symbol"] for c in candidates[:3]])
         return candidates[:TOP_N]
 
-    async def _score_with_indicators(self, sym: str) -> float:
-        """Fetch 15m OHLCV and compute a deep score — volatility-weighted for momentum strategy."""
+    async def _score_with_indicators(self, sym: str, ticker_24h: dict | None = None) -> dict:
+        """Fetch 15m OHLCV, run coin health check, then compute deep score."""
         try:
             data = await self._get("/api/v3/klines",
                                    {"symbol": sym, "interval": "15m", "limit": 60})
@@ -155,6 +163,22 @@ class MarketScanner:
             for col in ["open","high","low","close","volume"]:
                 df[col] = df[col].astype(float)
 
+            # ── Coin health check (runs before expensive indicator math) ──────
+            # Pass the raw kline rows and the 24h ticker (already fetched by quick_rank).
+            # If ticker_24h is missing, build a minimal substitute from kline data.
+            _ticker = ticker_24h or {
+                "lastPrice": str(df["close"].iloc[-1]),
+                "highPrice":  str(df["high"].max()),
+                "lowPrice":   str(df["low"].min()),
+            }
+            await self._ensure_session()
+            healthy = await self._health.is_healthy(
+                sym, _ticker, data, self._session
+            )
+            if not healthy:
+                return {"score": 0.0, "atr_pct": 0.0, "trend": "—", "rsi": 50,
+                        "regime": "—", "health_fail": True}
+
             c   = df["close"]
             _atr  = ta.atr(df["high"], df["low"], c, 14)
             _rsi  = ta.rsi(c, 14)
@@ -163,7 +187,7 @@ class MarketScanner:
             _e50  = ta.ema(c, 50)
             _macd = ta.macd(c, 12, 26, 9)
             if any(x is None for x in [_atr, _rsi, _e9, _e21, _e50, _macd]):
-                return 0.0
+                return {"score": 0.0, "atr_pct": 0.0, "trend": "—", "rsi": 50, "regime": "—"}
             atr   = _atr.dropna().iloc[-1]  if len(_atr.dropna())  else 0
             rsi   = _rsi.dropna().iloc[-1]  if len(_rsi.dropna())  else 50
             e9    = _e9.dropna().iloc[-1]   if len(_e9.dropna())   else 0
@@ -182,10 +206,13 @@ class MarketScanner:
             import math as _math
             vol_score  = 10.0 * _math.exp(-0.5 * ((atr_pct - 2.0) / 1.2) ** 2)
 
-            # Trend score: TRENDING regime only is valid — hard penalise no-trend
-            trend_up   = e9 > e21 > e50 and macd > msig
-            trend_dn   = e9 < e21 < e50 and macd < msig
-            trend_score = 3.0 if (trend_up or trend_dn) else 0.3  # strong bias to trending
+            # Trend detection: mirror regime.py logic — e9 must agree with e50 direction
+            # and lead e21 (catches early trends where e21/e50 haven't fully crossed yet)
+            trend_up   = (e9 > e21 and e9 > e50) and macd > msig
+            trend_dn   = (e9 < e21 and e9 < e50) and macd < msig
+
+            # Trend score: strong bias toward trending coins
+            trend_score = 3.0 if (trend_up or trend_dn) else 0.3
 
             # RSI score: momentum zone (40-65 for long, 35-60 for short) scores highest
             rsi_score  = 1.5 if 35 < rsi < 68 else (0.8 if 25 < rsi < 78 else 0.3)
@@ -194,7 +221,7 @@ class MarketScanner:
             deep_score = vol_score * trend_score * rsi_score
             trend_str  = ("↑ BULL" if trend_up else "↓ BEAR" if trend_dn else "→ FLAT")
 
-            # Regime: mirror the main RegimeClassifier logic (no import needed)
+            # Regime: match regime.py — e9 above/below both e21 and e50
             vol_ratio = atr / price if price else 0
             if vol_ratio > 0.05:
                 regime = "VOLATILE"
@@ -237,13 +264,21 @@ class MarketScanner:
             log("SCANNER", "NO_CANDIDATES_AFTER_EXCLUDE", excluded=list(exclude))
             return self.best_symbol
 
-        # Deep score top candidates in parallel
+        # Build ticker_24h map for health check reuse (already fetched in quick_rank)
+        # Each candidate carries its own ticker data from step 1.
+        _ticker_map = {c["symbol"]: c.get("_ticker24h") for c in top_quick}
+
+        # Deep score top candidates in parallel (health check runs inside each call)
         results = await asyncio.gather(
-            *[self._score_with_indicators(c["symbol"]) for c in top_quick]
+            *[self._score_with_indicators(c["symbol"], _ticker_map.get(c["symbol"]))
+              for c in top_quick]
         )
 
         ranked = []
         for cand, res in zip(top_quick, results):
+            if res.get("health_fail"):
+                log("SCANNER", "HEALTH_EXCLUDED", symbol=cand["symbol"])
+                continue
             ranked.append({
                 **cand,
                 "deep_score": res["score"],

@@ -127,19 +127,27 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
     ema_bull = e9 > e21 > e50
     ema_bear = e9 < e21 < e50
 
-    # Candle body filter: current candle must be showing live momentum, not a stale crossover.
-    # Threshold is ATR-relative so low-vol coins (BTC) aren't permanently blocked.
-    # Floor at 0.05% to keep the filter meaningful even on ultra-low-ATR coins.
+    # Candle body filter: use the PREVIOUS COMPLETED candle, not the live one.
+    # The live candle body changes every tick (briefly negative even in clear up-moves)
+    # and produces constant false NONEs.  The previous closed candle gives a stable,
+    # committed momentum read that matches what a trader sees on the chart.
     atr14         = ind.get("atr14", 0)
     atr_pct       = (atr14 / price * 100) if price and atr14 else 0
-    body_threshold = max(0.05, atr_pct * 0.25)  # 25% of ATR%: BTC≈0.07%, alts≈0.3-1%
-    candle_body_pct = (price - open_price) / open_price * 100 if open_price else 0
+    body_threshold = max(0.03, atr_pct * 0.20)  # 20% of ATR%: slightly looser floor
+    prev_close    = ind.get("prev_close", price)
+    prev_open     = ind.get("prev_open", open_price)
+    candle_body_pct = (prev_close - prev_open) / prev_open * 100 if prev_open else 0
     candle_bull = candle_body_pct > body_threshold
     candle_bear = candle_body_pct < -body_threshold
+    # Not-strongly-bear: allows entry on a flat/small-red candle when trend is confirmed
+    # (avoids blocking legitimate continuation entries on minor retracement candles)
+    candle_not_bear = candle_body_pct > -body_threshold
 
-    # Primary momentum entry: EMA stack + MACD + price above/below EMA21 + live candle
-    long_momentum  = ema_bull and rsi < 70 and macd > msig and price > e21 and candle_bull
-    short_momentum = ema_bear and rsi > 30 and macd < msig and price < e21 and candle_bear
+    # Primary momentum entry: EMA stack + MACD + price above/below EMA21
+    # candle_not_bear (instead of candle_bull) allows entry on small-bodied or flat candles
+    # within a confirmed trend — only hard bearish candles are filtered out.
+    long_momentum  = ema_bull and rsi < 70 and macd > msig and price > e21 and candle_not_bear
+    short_momentum = ema_bear and rsi > 30 and macd < msig and price < e21 and candle_bull
 
     # Continuation entry: deep pullback in confirmed bull trend only
     # Disabled in bear — counter-trend pullbacks fail too quickly in downtrends
@@ -172,7 +180,8 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
     log("SIGNAL", "EVAL",
         ema_bull=ema_bull, ema_bear=ema_bear,
         rsi=round(rsi, 1), macd_vs_sig=round(macd - msig, 6),
-        candle_body=round(candle_body_pct, 3), body_thr=round(body_threshold, 3),
+        prev_candle_body=round(candle_body_pct, 3), body_thr=round(body_threshold, 3),
+        candle_bull=candle_bull, candle_not_bear=candle_not_bear,
         long_momentum=long_momentum, long_pullback=long_pullback,
         long_bb=long_bb, bear_rev=bear_reversal, transition=transition_long,
         result="BUY" if long_signal else ("SELL" if short_signal else "NONE"))
@@ -504,10 +513,13 @@ async def main_loop():
                 instr = queue.get_nowait()
                 action = instr["action"]
                 if action == "RESUME":
-                    risk.halt_flag  = False
-                    risk.halt_until = 0
-                    push_log("[INSTRUCTION] RESUME — trading resumed by operator")
-                    log("AGENT", "RESUMED", source=instr.get("source",""))
+                    _prev_reason       = risk.halt_reason or "operator halt"
+                    risk.halt_flag     = False
+                    risk.halt_until    = 0
+                    risk.halt_reason   = ""
+                    risk.consec_losses = 0   # clear streak so same sequence doesn't re-halt immediately
+                    push_log(f"[INSTRUCTION] RESUME — trading resumed (was halted: {_prev_reason})")
+                    log("AGENT", "RESUMED", source=instr.get("source",""), prev_reason=_prev_reason)
                     update_state(halt=False)
                 elif action == "HALT":
                     await risk.emergency_halt(om, "operator_halt", equity)
@@ -952,21 +964,26 @@ async def main_loop():
                 await _cycle_sleep()
                 continue
 
-            # Re-check risk state immediately after any position close in this cycle.
-            # Prevents entering a new trade in the same cycle a stop-loss was hit — the daily
-            # DD limit may have just been breached (as happened: FIDA stop → AIGENSYN entry).
-            if not em.positions:
+            # Re-check risk after an actual position close this cycle.
+            # Only fires when exit_actions is non-empty (a close/TP actually happened),
+            # not on every idle cycle — avoids spurious halts from transient API pricing
+            # failures that make equity appear low when no trade occurred.
+            if exit_actions and not em.positions:
                 try:
                     _post_close_equity = await om.get_equity(symbol=active_symbol, price=current_price)
                     risk.update_metrics(_post_close_equity)
                 except Exception as _eq_err:
                     log("AGENT", "EQUITY_FETCH_FAILED", error=str(_eq_err)[:160])
-                    # Use last known equity for risk check — don't block entry on transient API error
-                if risk.halt_active():
-                    update_state(halt=True)
-                    push_log(f"[HALT] Daily DD limit reached after exit — no new entries this session")
-                    await _cycle_sleep()
-                    continue
+            if risk.halt_active():
+                _halt_reason = risk.halt_reason or "risk limit reached"
+                update_state(halt=True)
+                push_log(f"[HALT] {_halt_reason} — no new entries this session")
+                log("AGENT", "HALT_ACTIVE", reason=_halt_reason,
+                    day_start=round(risk.day_start_equity or 0, 2),
+                    equity=round(equity, 2),
+                    consec_losses=risk.consec_losses)
+                await _cycle_sleep()
+                continue
 
             # Spot mode: only BUY can open a new position (no naked short selling)
             if signal == "BUY" and not em.positions:
@@ -978,6 +995,28 @@ async def main_loop():
                     _wait = int(ENTRY_COOLDOWN - (_now - _last_fill)) // 60
                     push_log(f"[COOLDOWN] {active_symbol} — {_wait}m left before re-entry allowed")
                     signal = "NONE"
+
+            # Solution 3: BTC daily-range guard.
+            # On low-volatility days (BTC 24h range < 1.5%), 15m trades cannot
+            # consistently beat the 0.15% fee threshold — the coin's entire daily
+            # range is only 10× the fee cost, leaving no margin for missed entries.
+            # We check once per cycle via the ticker (already fetched above).
+            if signal == "BUY" and not em.positions and active_symbol == "BTCUSDT":
+                _btc_high = tick.get("high", current_price)
+                _btc_low  = tick.get("low",  current_price)
+                _BTC_MIN_DAILY_RANGE = 0.015   # 1.5%
+                if _btc_low > 0:
+                    _btc_daily_range = (_btc_high - _btc_low) / _btc_low
+                    if _btc_daily_range < _BTC_MIN_DAILY_RANGE:
+                        push_log(
+                            f"[SKIP] BTCUSDT 24h range {_btc_daily_range:.2%} "
+                            f"< {_BTC_MIN_DAILY_RANGE:.1%} minimum — "
+                            f"flat market, fees would consume profit"
+                        )
+                        log("AGENT", "GATE_BLOCK_BTC_FLAT",
+                            daily_range_pct=round(_btc_daily_range * 100, 3),
+                            min_pct=_BTC_MIN_DAILY_RANGE * 100)
+                        signal = "NONE"
 
             if signal == "BUY" and not em.positions:
                 try:
@@ -1062,9 +1101,24 @@ async def main_loop():
                     continue
                 stop_d      = indicators["atr14"] * cfg.ATR_STOP_MULT
                 pool_budget = _ep.get_budget(_agent_slot, equity)
+                log("AGENT", "SIZING_PRE",
+                    symbol=active_symbol, equity=round(equity, 2),
+                    raw_usdt=round(raw_usdt, 2), pool_budget=round(pool_budget, 2),
+                    stop_d=round(stop_d, 4), size_mult=size_mult)
                 qty    = PositionSizer.calculate(equity, current_price, stop_d, size_mult,
                                                  usdt_available=raw_usdt,
                                                  pool_budget=pool_budget)
+
+                if not qty:
+                    _order_usdt = (equity * cfg.RISK_PCT / stop_d * current_price) if stop_d else 0
+                    push_log(f"[SKIP] {active_symbol} sizing aborted — "
+                             f"equity=${equity:.2f} pool_budget=${pool_budget:.2f} "
+                             f"est_order=${min(_order_usdt, pool_budget):.2f} "
+                             f"(min $10 required)")
+                    log("AGENT", "SIZING_ABORTED", symbol=active_symbol,
+                        equity=round(equity, 2), pool_budget=round(pool_budget, 2),
+                        raw_usdt=round(raw_usdt, 2), stop_d=round(stop_d, 4),
+                        size_mult=size_mult, price=current_price)
 
                 if qty:
                     order = await om.submit("BUY", qty, tick, indicators,
@@ -1109,6 +1163,7 @@ async def main_loop():
                 daily_dd=((risk.day_start_equity - equity) / risk.day_start_equity * 100)
                           if risk.day_start_equity else 0,
                 halt=risk.halt_flag,
+                halt_reason=risk.halt_reason,
                 portfolio=_pf,
                 session_pnl=round(_s_pnl, 2),
                 session_pnl_pct=round(_s_pnl_pct, 2),
