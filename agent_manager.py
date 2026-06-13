@@ -44,6 +44,7 @@ _ENV_ALLOWED = frozenset({
     "BINANCE_DEMO_API_KEY",    "BINANCE_DEMO_API_SECRET",
     "BINANCE_LIVE_API_KEY",    "BINANCE_LIVE_API_SECRET",
     "DIPU_ALERT_WEBHOOK",      "DIPU_AUTHORIZED_AGENT_TOKENS",
+    "TZ",
 })
 _ENV_SENSITIVE = frozenset({"SECRET", "KEY", "TOKEN"})
 
@@ -468,6 +469,33 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
   </div>
 
   <div class="env-group">
+    <div class="env-group-title">System</div>
+    <div class="env-row">
+      <div class="field">
+        <label>Timezone <span class="env-sub">all log and dashboard timestamps</span></label>
+        <input id="ev-TZ" type="text" list="tz-list" placeholder="Asia/Dubai" class="env-input" style="min-width:220px">
+        <datalist id="tz-list">
+          <option value="Asia/Dubai"><option value="Asia/Riyadh"><option value="Asia/Kuwait">
+          <option value="Asia/Qatar"><option value="Asia/Bahrain"><option value="Asia/Muscat">
+          <option value="Asia/Kolkata"><option value="Asia/Karachi"><option value="Asia/Dhaka">
+          <option value="Asia/Singapore"><option value="Asia/Shanghai"><option value="Asia/Tokyo">
+          <option value="Asia/Seoul"><option value="Asia/Bangkok"><option value="Asia/Jakarta">
+          <option value="Asia/Taipei"><option value="Asia/Hong_Kong"><option value="Asia/Kuala_Lumpur">
+          <option value="Europe/London"><option value="Europe/Paris"><option value="Europe/Berlin">
+          <option value="Europe/Madrid"><option value="Europe/Rome"><option value="Europe/Amsterdam">
+          <option value="Europe/Moscow"><option value="Europe/Istanbul"><option value="Europe/Zurich">
+          <option value="America/New_York"><option value="America/Chicago"><option value="America/Denver">
+          <option value="America/Los_Angeles"><option value="America/Toronto"><option value="America/Vancouver">
+          <option value="America/Sao_Paulo"><option value="America/Mexico_City"><option value="America/Buenos_Aires">
+          <option value="Australia/Sydney"><option value="Australia/Melbourne"><option value="Australia/Brisbane">
+          <option value="Pacific/Auckland"><option value="Africa/Cairo"><option value="Africa/Johannesburg">
+          <option value="Africa/Lagos"><option value="Africa/Nairobi"><option value="UTC">
+        </datalist>
+      </div>
+    </div>
+  </div>
+
+  <div class="env-group">
     <div class="env-group-title">Integrations</div>
     <div class="env-row">
       <div class="field" style="flex:1;min-width:300px">
@@ -797,7 +825,8 @@ const _ENV_MASKED = new Set([
   'DIPU_AUTHORIZED_AGENT_TOKENS',
 ]);
 const _ENV_KEYS = [
-  'TRADING_MODE','BINANCE_TESTNET_API_KEY','BINANCE_TESTNET_API_SECRET',
+  'TRADING_MODE','TZ',
+  'BINANCE_TESTNET_API_KEY','BINANCE_TESTNET_API_SECRET',
   'BINANCE_DEMO_API_KEY','BINANCE_DEMO_API_SECRET',
   'BINANCE_LIVE_API_KEY','BINANCE_LIVE_API_SECRET',
   'DIPU_ALERT_WEBHOOK','DIPU_AUTHORIZED_AGENT_TOKENS',
