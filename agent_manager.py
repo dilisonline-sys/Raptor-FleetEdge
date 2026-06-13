@@ -18,6 +18,7 @@ MANAGER_PORT      = 7430
 STATE_FILE        = Path("/tmp/rfe_manager_state.json")
 AGENT_SCRIPT      = Path(__file__).parent / "agent.py"
 EMAIL_CONFIG_FILE = Path("/tmp/rfe_email_config.json")
+ENV_FILE          = Path(__file__).parent / ".env"
 
 # mode → (default port, API label, badge colour)
 MODE_META = {
@@ -35,6 +36,49 @@ BINANCE_PUBLIC = "https://api.binance.com"
 LIVE_PORTS  = {0: 7434, 1: 7435, 2: 7436, 3: 7437}  # slot → dashboard port
 POOL_FILE   = "/tmp/rfe_equity_pool.json"
 COIN_BLACKLIST  = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT", "USDPUSDT"}
+
+
+_ENV_ALLOWED = frozenset({
+    "TRADING_MODE",
+    "BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_API_SECRET",
+    "BINANCE_DEMO_API_KEY",    "BINANCE_DEMO_API_SECRET",
+    "BINANCE_LIVE_API_KEY",    "BINANCE_LIVE_API_SECRET",
+    "DIPU_ALERT_WEBHOOK",      "DIPU_AUTHORIZED_AGENT_TOKENS",
+})
+_ENV_SENSITIVE = frozenset({"SECRET", "KEY", "TOKEN"})
+
+
+def _env_is_sensitive(key: str) -> bool:
+    ku = key.upper()
+    return any(s in ku for s in _ENV_SENSITIVE)
+
+
+def _env_read() -> dict[str, str]:
+    result: dict[str, str] = {}
+    if not ENV_FILE.exists():
+        return result
+    for line in ENV_FILE.read_text().splitlines():
+        s = line.strip()
+        if s and not s.startswith('#') and '=' in s:
+            k, _, v = s.partition('=')
+            result[k.strip()] = v.strip()
+    return result
+
+
+def _env_write(updates: dict[str, str]) -> None:
+    lines: list[str] = ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []
+    key_idx: dict[str, int] = {}
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s and not s.startswith('#') and '=' in s:
+            key_idx[s.partition('=')[0].strip()] = i
+    new_lines = list(lines)
+    for k, v in updates.items():
+        if k in key_idx:
+            new_lines[key_idx[k]] = f"{k}={v}"
+        else:
+            new_lines.append(f"{k}={v}")
+    ENV_FILE.write_text('\n'.join(new_lines).rstrip('\n') + '\n')
 
 
 async def _fetch_available_coins():
@@ -273,6 +317,19 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 [data-theme="day"] .slot-sym.active{color:#00875a}
 [data-theme="day"] .chk-label{color:#333}
 [data-theme="day"] .dot.off{background:#bbb}
+/* ── Env settings panel ── */
+.env-panel{background:#0e0e0e;border:1px solid #1e1e1e;border-radius:8px;padding:20px;margin-bottom:28px}
+.env-group{margin-bottom:20px}
+.env-group-title{font-size:.68rem;color:#00e5ff;text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #1a1a1a}
+.env-row{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:8px}
+.env-note{font-size:.72rem;color:#aaa;margin-bottom:18px;padding:9px 13px;background:#0a0a0a;border:1px solid #222;border-left:3px solid #ff9800;border-radius:4px}
+.env-sub{font-size:.62rem;color:#555;text-transform:none;letter-spacing:0;margin-left:6px;font-weight:normal}
+.env-input{background:#0a0a0a;border:1px solid #222;color:#fff;padding:7px 10px;border-radius:5px;font-family:'Courier New',monospace;font-size:.75rem;min-width:220px}
+[data-theme="day"] .env-panel{background:#fff;border-color:#dde0e6}
+[data-theme="day"] .env-note{background:#fff8e8;border-color:#e0c070;color:#666}
+[data-theme="day"] .env-group-title{color:#0077bb;border-color:#e4e6ea}
+[data-theme="day"] .env-sub{color:#999}
+[data-theme="day"] .env-input{background:#fff;border-color:#ccc;color:#111}
 </style>
 </head>
 <body>
@@ -367,6 +424,70 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 .chk-label{display:flex;align-items:center;gap:6px;font-size:.72rem;color:#fff;cursor:pointer;user-select:none}
 .chk-label input{accent-color:#00e676;width:14px;height:14px;cursor:pointer}
 </style>
+
+<h2>&#9881; Environment Settings</h2>
+<div class="env-panel" id="env-panel">
+  <div class="env-note">&#9888; Values are saved to .env immediately. Changes take effect after stopping and relaunching the fleet.</div>
+
+  <div class="env-group">
+    <div class="env-group-title">Trading</div>
+    <div class="env-row">
+      <div class="field">
+        <label>Trading Mode</label>
+        <select id="ev-TRADING_MODE" style="min-width:240px">
+          <option value="testnet">testnet — testnet.binance.vision</option>
+          <option value="demo">demo — demo-api.binance.com</option>
+          <option value="live">&#9888; live — api.binance.com (real funds)</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="env-group">
+    <div class="env-group-title">Testnet Credentials <span class="env-sub">testnet.binance.vision</span></div>
+    <div class="env-row">
+      <div class="field"><label>API Key</label><input id="ev-BINANCE_TESTNET_API_KEY" type="text" placeholder="testnet API key" class="env-input" style="min-width:300px"></div>
+      <div class="field"><label>API Secret</label><input id="ev-BINANCE_TESTNET_API_SECRET" type="password" placeholder="unchanged" class="env-input" style="min-width:240px"></div>
+    </div>
+  </div>
+
+  <div class="env-group">
+    <div class="env-group-title">Demo Credentials <span class="env-sub">demo-api.binance.com</span></div>
+    <div class="env-row">
+      <div class="field"><label>API Key</label><input id="ev-BINANCE_DEMO_API_KEY" type="text" placeholder="demo API key" class="env-input" style="min-width:300px"></div>
+      <div class="field"><label>API Secret</label><input id="ev-BINANCE_DEMO_API_SECRET" type="password" placeholder="unchanged" class="env-input" style="min-width:240px"></div>
+    </div>
+  </div>
+
+  <div class="env-group">
+    <div class="env-group-title">Live Credentials <span class="env-sub" style="color:#ff5252">api.binance.com — Trade + Read only, never enable withdrawals</span></div>
+    <div class="env-row">
+      <div class="field"><label>API Key</label><input id="ev-BINANCE_LIVE_API_KEY" type="text" placeholder="live API key" class="env-input" style="min-width:300px"></div>
+      <div class="field"><label>API Secret</label><input id="ev-BINANCE_LIVE_API_SECRET" type="password" placeholder="unchanged" class="env-input" style="min-width:240px"></div>
+    </div>
+  </div>
+
+  <div class="env-group">
+    <div class="env-group-title">Integrations</div>
+    <div class="env-row">
+      <div class="field" style="flex:1;min-width:300px">
+        <label>Alert Webhook URL <span class="env-sub">Discord / Slack / Telegram (optional)</span></label>
+        <input id="ev-DIPU_ALERT_WEBHOOK" type="text" placeholder="https://hooks.slack.com/…" class="env-input" style="width:100%;min-width:380px">
+      </div>
+    </div>
+    <div class="env-row" style="margin-top:10px">
+      <div class="field" style="flex:1;min-width:300px">
+        <label>Authorized Agent Tokens <span class="env-sub">comma-separated, for external API POST access (optional)</span></label>
+        <input id="ev-DIPU_AUTHORIZED_AGENT_TOKENS" type="text" placeholder="token1,token2" class="env-input" style="width:100%;min-width:380px">
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:12px;margin-top:6px">
+    <button class="btn btn-spawn" onclick="saveEnvConfig()">&#128190; Save .env</button>
+    <span id="env-msg" style="font-size:.72rem;color:#00e676"></span>
+  </div>
+</div>
 
 <script>
 const MODE_COLOR = {testnet:'#ffd600', demo:'#00bcd4', live:'#ff1744'};
@@ -668,6 +789,60 @@ async function sendPnlNow() {
 
 loadEmailConfig();
 
+// ── Env settings ─────────────────────────────────────────
+const _ENV_MASKED = new Set([
+  'BINANCE_TESTNET_API_KEY','BINANCE_TESTNET_API_SECRET',
+  'BINANCE_DEMO_API_KEY','BINANCE_DEMO_API_SECRET',
+  'BINANCE_LIVE_API_KEY','BINANCE_LIVE_API_SECRET',
+  'DIPU_AUTHORIZED_AGENT_TOKENS',
+]);
+const _ENV_KEYS = [
+  'TRADING_MODE','BINANCE_TESTNET_API_KEY','BINANCE_TESTNET_API_SECRET',
+  'BINANCE_DEMO_API_KEY','BINANCE_DEMO_API_SECRET',
+  'BINANCE_LIVE_API_KEY','BINANCE_LIVE_API_SECRET',
+  'DIPU_ALERT_WEBHOOK','DIPU_AUTHORIZED_AGENT_TOKENS',
+];
+
+async function loadEnvConfig() {
+  try {
+    const r = await fetch('/api/env');
+    const d = await r.json();
+    for (const [k, v] of Object.entries(d)) {
+      const el = document.getElementById('ev-' + k);
+      if (!el) continue;
+      if (el.tagName === 'SELECT') {
+        el.value = v || 'demo';
+      } else if (v === '__set__') {
+        el.placeholder = 'unchanged (already set)';
+        el.value = '';
+      } else {
+        el.value = v || '';
+      }
+    }
+  } catch(e) {}
+}
+
+async function saveEnvConfig() {
+  const msg = document.getElementById('env-msg');
+  const body = {};
+  for (const k of _ENV_KEYS) {
+    const el = document.getElementById('ev-' + k);
+    if (!el) continue;
+    const v = el.tagName === 'SELECT' ? el.value : el.value.trim();
+    if (_ENV_MASKED.has(k) && !v) continue;
+    body[k] = v;
+  }
+  if (!Object.keys(body).length) {
+    msg.textContent = '✗ Nothing to save'; setTimeout(() => msg.textContent = '', 4000); return;
+  }
+  msg.textContent = 'Saving…';
+  const r = await fetch('/api/env', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  const d = await r.json();
+  msg.textContent = d.ok ? '✓ Saved — restart fleet to apply changes' : '✗ ' + (d.error || 'error');
+  setTimeout(() => msg.textContent = '', 7000);
+}
+loadEnvConfig();
+
 // ── Theme toggle ──────────────────────────────────────────
 function _applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
@@ -705,6 +880,8 @@ class AgentManager:
         self._app.router.add_post("/api/email-config",     self._email_config_post)
         self._app.router.add_post("/api/email-test",       self._email_test)
         self._app.router.add_post("/api/email-pnl",        self._email_pnl_now)
+        self._app.router.add_get("/api/env",               self._env_get)
+        self._app.router.add_post("/api/env",              self._env_post)
         self._app.router.add_route("*", "/agent/{name}/{path:.*}", self._proxy)
 
     async def _dashboard(self, _):
@@ -1007,6 +1184,23 @@ class AgentManager:
             return web.json_response({"ok": result})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+
+    async def _env_get(self, _) -> web.Response:
+        raw  = _env_read()
+        safe = {k: ("__set__" if (_env_is_sensitive(k) and v) else v) for k, v in raw.items()}
+        return web.json_response(safe)
+
+    async def _env_post(self, request: web.Request) -> web.Response:
+        try:
+            body    = await request.json()
+            updates = {k: str(v) for k, v in body.items()
+                       if k in _ENV_ALLOWED and v is not None and str(v).strip()}
+            if not updates:
+                return web.json_response({"error": "no valid fields provided"}, status=400)
+            _env_write(updates)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
 
     async def _get_pool_data(self) -> dict:
         try:
