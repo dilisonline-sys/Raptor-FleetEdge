@@ -17,6 +17,7 @@ dipu is a multi-agent cryptocurrency trading system built for Binance Spot. A **
 - Liquidates base asset back to USDT automatically before every coin rotation (slots 1–3)
 - Persists open positions across restarts — exact entry, stop, and TP values are restored
 - Each agent exposes a live dashboard with 1-second candle charts, rule analyst panel, and order log
+- Pre-screens every candidate coin for structural fee viability before assignment (coin health filter)
 
 ---
 
@@ -97,14 +98,13 @@ docker compose up -d --build
 ```
 
 This builds the image, starts the manager, and makes it available at **http://localhost:7430**.
+The fleet auto-starts 5 seconds after the manager comes up — no manual spawn required.
 
 ### 4. Open the fleet dashboard
 
 ```
 http://localhost:7430
 ```
-
-From there, click **Spawn Fleet** to launch all 4 agents. They will auto-assign coins: slot 0 always takes BTCUSDT, slots 1–3 take the top 3 ranked altcoins.
 
 ---
 
@@ -167,6 +167,9 @@ Each agent dashboard includes:
 4. Restrict to your server IP for security
 5. Set `TRADING_MODE=live` only after at least 2 weeks of successful demo trading
 
+### Fee reduction (BNB)
+Enable **Use BNB to pay for fees** in your Binance account settings. This reduces the fee rate from 0.10% to 0.075% per side (25% saving). Keep a small BNB balance in the spot wallet — the system does not manage BNB holdings automatically.
+
 ---
 
 ## Manual Docker Commands
@@ -185,8 +188,7 @@ docker run -d \
   -p 7430:7430 \
   -p 7434:7434 \
   -p 7435:7435 \
-  -p 7436:7436 \
-  -p 7437:7437 \
+  -p 7436:7437 \
   -v dipu_logs:/tmp \
   dipu-agent
 
@@ -257,7 +259,29 @@ curl -X POST http://localhost:7430/agent/dipu-live/instruction \
 
 ---
 
-## Coin Rotation & Liquidation
+## Coin Selection & Health Screening
+
+### Market Scanner
+
+The background scanner ranks all Binance USDT pairs every 5 minutes. Coins are scored in two steps:
+
+1. **Quick rank** — 24h ticker universe filter (volume ≥ $15M, price ≥ $0.50, spread ≤ 0.30%, 1h move ≥ 0.5%)
+2. **Deep score** — 15m OHLCV indicators: ATR volatility bell curve × trend alignment × RSI zone
+
+### Coin Health Filter
+
+Before a candidate is deep-scored, `coin_health.py` runs four structural checks to reject coins that are **structurally unable to beat the 0.15% round-trip fee**:
+
+| Check | Condition | Example failure |
+|---|---|---|
+| `LOW_PRICE` | Price < $0.50 | XPLUSDT at $0.08 — one tick is 0.125% of price |
+| `LOW_DAILY` | 24h range < 1.0% (1.5% for BTC) | BTC on a flat day with only 0.9% total range |
+| `TICK_TRAP` | Min tick ≥ 50% of 15m ATR | Coin cannot produce enough per-candle movement to cover fees |
+| `FLAT_MOVER` | < 2 of last 4 candles had body > 0.075% | Rolling history shows coin has been statistically unable to beat fees |
+
+Results are cached 5 minutes per coin to avoid redundant API calls. Coins that fail any check are excluded from the ranked list and logged as `HEALTH_EXCLUDED`.
+
+### Coin Rotation
 
 Agents in slots 1–3 automatically rotate to the best-ranked coin when:
 
@@ -265,7 +289,7 @@ Agents in slots 1–3 automatically rotate to the best-ranked coin when:
 |---|---|
 | Scanner pick | Background scanner finds a higher-ranked coin with no open position |
 | Quality gate escape | 2 consecutive data quality fails on the current coin |
-| Ranging escape | Current coin classified RANGING — immediately rotates to next ranked coin |
+| Ranging escape | Current coin classified RANGING — rotates to next ranked coin |
 | Volatile escape | Current coin VOLATILE for 10+ minutes — forces rotation |
 | Signal rotate | No tradeable setup for 5 consecutive cycles |
 | SELL with no position | Bear signal on a coin we don't hold — rotates immediately |
@@ -275,6 +299,96 @@ Agents in slots 1–3 automatically rotate to the best-ranked coin when:
 **Before every rotation** (slots 1–3 only), the agent automatically sells any remaining base asset back to USDT so the equity pool always has liquid capital for the next entry.
 
 **Slot 0 (BTC agent) never rotates and never sells** — it stays in BTCUSDT permanently.
+
+---
+
+## Entry Gates
+
+Every BUY signal passes through a chain of gates before an order is placed. Any gate failure cancels the entry for that cycle and is logged to the dashboard:
+
+| Gate | Condition | Log tag |
+|---|---|---|
+| Cooldown | 30-minute re-entry cooldown after last fill on same coin | `[COOLDOWN]` |
+| BTC flat-day | BTC 24h range < 1.5% — flat market, fees consume profit | `GATE_BLOCK_BTC_FLAT` |
+| TP distance | TP1 distance < 0.22% of price (fees + margin) | `GATE_BLOCK_TP` |
+| R:R ratio | Reward < 1.5× risk at current ATR | `GATE_BLOCK_RR` |
+| Fear & Greed | F&G index < 10 (full panic — no new longs) | `GATE_BLOCK_FG` |
+| ATR cap | ATR > 3% of price — too volatile, stops blow on noise | (inline skip) |
+| NN confirmation | Neural network up-probability < confidence floor (when model accuracy > 57%) | `NN.GATE_BLOCK` |
+| Duplicate coin | Another slot already holds the same coin | `[SKIP] duplicate` |
+| Pool budget | Order notional < $10 after equity pool allocation | `[SKIP] sizing aborted` |
+
+---
+
+## Signal Engine
+
+Signals are computed from the **previous completed 15m candle** (not the live forming candle) to avoid entry on transient tick noise.
+
+| Signal | Required conditions |
+|---|---|
+| `BUY` (momentum) | EMA9 > EMA21 > EMA50 AND RSI < 70 AND MACD > signal AND price > EMA21 AND candle not bearish |
+| `BUY` (pullback) | EMA stack bullish AND RSI < 35 AND price > EMA50 |
+| `BUY` (BB bounce) | Price at/below lower BB AND RSI < 32 AND bullish EMA stack |
+| `SELL` (momentum) | EMA stack bearish AND RSI > 30 AND MACD < signal AND price < EMA21 AND bullish candle |
+| `SELL` (pullback) | EMA stack bearish AND RSI > 65 AND price < EMA21 |
+
+The regime classifier (`regime.py`) gates which signals are valid:
+- **TRENDING**: all signals active
+- **RANGING / VOLATILE**: no new entries — wait for regime change or rotate
+
+---
+
+## Risk Engine & Halt System
+
+### Automatic halts
+
+| Trigger | Halt duration | Reason logged |
+|---|---|---|
+| Daily drawdown ≥ 10% | 4 hours | `daily drawdown X% (start $Y → now $Z)` |
+| Monthly drawdown ≥ 15% | 30 days | `monthly drawdown X%` |
+| N consecutive losses (default 3) | 4 hours | `3 consecutive losses` |
+
+The halt reason is always displayed in the agent dashboard log panel so the cause is never ambiguous.
+
+### Transient equity glitch protection
+
+`update_metrics` is skipped if the reported equity is less than 30% of the day-start equity — this prevents a Binance API pricing glitch (e.g. a coin price returned as 0) from triggering a false drawdown halt.
+
+### Halts are only evaluated after a position closes
+
+The risk engine is only called when a trade actually exits. It is never called on idle cycles, preventing compounding halt triggers during periods of no trading activity.
+
+### RESUME behaviour
+
+Sending `RESUME` via instruction:
+1. Clears `halt_flag` and `halt_until`
+2. Resets `consec_losses` to 0 (prevents re-halt on the next losing trade)
+3. Logs the previous halt reason so the dashboard shows what was resolved
+
+---
+
+## Position Sizing
+
+Position size is calculated as:
+
+```
+risk_amount = equity × RISK_PCT          # 10% of equity for live
+stop_dist   = ATR × ATR_STOP_MULT        # 1.0× ATR (tight stop)
+raw_qty     = risk_amount / stop_dist
+
+budget      = min(per_slot_share, pool_headroom)
+order_usdt  = min(raw_qty × price, budget, equity × MAX_TRADE_PCT)
+```
+
+If the per-slot equity share falls below the Binance $10 minimum order, the system falls back to the full available pool headroom rather than silently skipping the trade.
+
+### TP ladder
+
+| Level | Distance from entry | Close fraction |
+|---|---|---|
+| TP1 | 1.5× ATR (or 40% of 1h range, whichever is larger) | 33% |
+| TP2 | 2.5× ATR | 33% |
+| TP3 | 4.0× ATR | 34% |
 
 ---
 
@@ -357,8 +471,8 @@ Each agent accepts POST instructions at `/instruction`. Valid actions:
 | `SELL` | Force a sell / close this cycle |
 | `CLOSE_ALL` | Submit market sell and clear all positions |
 | `HALT` | Emergency halt — stop trading |
-| `RESUME` | Resume after halt |
-| `RESET_DAY_START` | Reset risk baselines (`day_start_equity` / `month_start_equity`) to current equity — use after `RESUME` to prevent immediate re-halt |
+| `RESUME` | Resume after halt (also resets consecutive-loss counter) |
+| `RESET_DAY_START` | Reset risk baselines to current equity — use after `RESUME` to prevent immediate re-halt |
 | `SWITCH_COIN` | Switch to a specific symbol (e.g. `"symbol":"SOLUSDT"`) |
 | `RESUME_AUTO` | Return to scanner-driven coin selection |
 | `FORCE_BTC` | Switch to BTCUSDT immediately |
@@ -411,9 +525,31 @@ Before switching to `TRADING_MODE=live`:
 - [ ] Binance API key has **Trade + Read only** — no withdrawal permission
 - [ ] API key restricted to your server IP
 - [ ] `.env` is not committed to git (it is in `.gitignore`)
-- [ ] Daily drawdown halt is set appropriately (`DAILY_HALT_PCT` in `config.py`)
+- [ ] Daily drawdown halt is set appropriately (`DAILY_DD_LIMIT` in `config.py`)
 - [ ] Starting equity is the amount you are comfortable losing entirely
+- [ ] BNB balance held in spot wallet to receive 25% fee discount
 - [ ] You have read and understood the risk parameters in `config.py`
+
+---
+
+## Key Configuration Parameters (`config.py`)
+
+| Parameter | Default (live) | Description |
+|---|---|---|
+| `RISK_PCT` | `0.10` | Fraction of equity risked per trade |
+| `MAX_TRADE_PCT` | `0.70` | Max fraction of equity deployed in one position |
+| `MAX_EXPOSURE` | `0.70` | Max fraction of total equity deployed fleet-wide |
+| `FLEET_SIZE` | `4` | Number of agent slots sharing the pool |
+| `ATR_STOP_MULT` | `1.0` | Stop distance = 1× ATR from entry |
+| `TP1_R` | `1.5` | TP1 = 1.5× stop distance |
+| `TP2_R` | `2.5` | TP2 = 2.5× stop distance |
+| `TP3_R` | `4.0` | TP3 = 4.0× stop distance |
+| `DAILY_DD_LIMIT` | `0.10` | Halt after 10% daily drawdown |
+| `MONTHLY_DD_LIMIT` | `0.15` | Halt after 15% monthly drawdown |
+| `MAX_CONSEC_LOSS` | `3` | Halt after 3 consecutive losing trades |
+| `MIN_PRICE` | `0.50` | Reject coins below $0.50 (tick-size protection) |
+| `MIN_VOLUME_USDT` | `15,000,000` | Reject coins with < $15M 24h volume |
+| `CYCLE_SLEEP_SECONDS` | `60` | Seconds between trading loop iterations |
 
 ---
 
@@ -422,19 +558,21 @@ Before switching to `TRADING_MODE=live`:
 | File | Role |
 |---|---|
 | `agent.py` | Main trading loop — orchestrates all modules |
-| `agent_manager.py` | Fleet manager — spawns/proxies/monitors agents |
+| `agent_manager.py` | Fleet manager — spawns/proxies/monitors agents, auto-starts fleet on boot |
+| `coin_health.py` | Pre-assignment structural fitness filter — rejects coins that cannot beat fees |
 | `market_data.py` | Feeds, order book, indicators (RSI, EMA, MACD, ATR, BB, VWAP) |
-| `market_scanner.py` | Ranks coins by volatility/momentum score |
+| `market_scanner.py` | Ranks coins by volatility/momentum score; integrates health filter |
 | `sizing.py` | Position sizing with volatility and sentiment adjustment |
 | `order_manager.py` | Order submission, retries, fill tracking, Simple Earn value fetcher |
 | `exit_manager.py` | Hard stops, break-even, trailing stops, TP1/2/3 ladder |
-| `risk_engine.py` | Drawdown tracking, kill switch, alerts |
+| `risk_engine.py` | Drawdown tracking, kill switch, halt reason logging, alerts |
 | `regime.py` | TRENDING / RANGING / VOLATILE classification |
 | `equity_pool.py` | Shared pool — coordinates budgets, coin exclusions, earn value across agents |
 | `portfolio_tracker.py` | Full account P&L — USDT + spot positions + Simple Earn (Flexible) holdings |
 | `agent_monitor.py` | 30-minute health check with auto-resolution — resumes halted agents, resets baselines, emails report |
 | `rule_analyst.py` | Indicator-driven advisory analyst |
 | `rule_coin_selector.py` | Rule-based profitability coin selector |
+| `nn_predictor.py` | Pure-NumPy MLP — trains on live candle data to confirm entry direction |
 | `email_notifier.py` | Email alerts — fills, rotations, 4h P&L reports |
 | `instruction_server.py` | Per-agent HTTP dashboard and instruction endpoint |
 | `config.py` | All parameters in one place |
@@ -465,7 +603,7 @@ This value is shown in the **PORTFOLIO card** on every agent dashboard and inclu
 
 Before each check the monitor queries every agent's live state via HTTP. If an agent is halted but today's daily drawdown is below 5% (i.e. it's a new UTC day and the drawdown counter has reset):
 
-1. Sends `RESUME` to clear the halt flag
+1. Sends `RESUME` to clear the halt flag and reset consecutive-loss counter
 2. Waits 2 seconds, then sends `RESET_DAY_START` to reset the risk engine baselines to current equity — this prevents the agent from immediately re-halting on its next metrics update
 3. Resets `/tmp/dipu_portfolio_day.json` so future restarts also use the correct baseline
 
