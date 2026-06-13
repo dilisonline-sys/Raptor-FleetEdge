@@ -33,7 +33,7 @@ _agents: dict[str, dict] = {}
 # Available coins fetched from Binance at startup — sorted by 24h volume
 _available_coins: list[str] = []
 BINANCE_PUBLIC = "https://api.binance.com"
-LIVE_PORTS  = {0: 7434, 1: 7435, 2: 7436, 3: 7437}  # slot → dashboard port
+LIVE_PORTS  = {0: 7434, 1: 7435, 2: 7436, 3: 7437, 4: 7438}  # slot → dashboard port
 POOL_FILE   = "/tmp/rfe_equity_pool.json"
 COIN_BLACKLIST  = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT", "USDPUSDT"}
 
@@ -204,14 +204,16 @@ def _agent_status(name: str) -> str:
     return "stopped"
 
 
-def _spawn(name: str, mode: str, port: int, symbol: str = "BTCUSDT", slot: int = 0) -> dict | None:
+def _spawn(name: str, mode: str, port: int, symbol: str = "BTCUSDT",
+           slot: int = 0, strategy: str = "momentum") -> dict | None:
     log_file = f"/tmp/rfe_{name}.log"
     env = {**os.environ,
-           "TRADING_MODE":  mode,
-           "AGENT_NAME":    name,
-           "AGENT_PORT":    str(port),
-           "AGENT_SYMBOL":  symbol.upper(),
-           "AGENT_SLOT":    str(slot)}
+           "TRADING_MODE":   mode,
+           "AGENT_NAME":     name,
+           "AGENT_PORT":     str(port),
+           "AGENT_SYMBOL":   symbol.upper(),
+           "AGENT_SLOT":     str(slot),
+           "AGENT_STRATEGY": strategy}
     try:
         proc = subprocess.Popen(
             [sys.executable, str(AGENT_SCRIPT)],
@@ -221,7 +223,8 @@ def _spawn(name: str, mode: str, port: int, symbol: str = "BTCUSDT", slot: int =
             start_new_session=True,   # detach from manager — prevents zombie accumulation
         )
         info = {"pid": proc.pid, "port": port, "mode": mode, "symbol": symbol.upper(),
-                "started_at": time.time(), "log_file": log_file, "name": name, "slot": slot}
+                "started_at": time.time(), "log_file": log_file, "name": name,
+                "slot": slot, "strategy": strategy}
         _agents[name] = info
         _save_state()
         return info
@@ -292,9 +295,10 @@ h2{color:#fff;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;mar
 .fleet-eq{color:#00e5ff;font-size:.95rem;font-weight:bold;margin-left:4px}
 .fleet-dd{font-size:.72rem;color:#fff}
 .fleet-controls{margin-left:auto;display:flex;gap:8px}
-.slot-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-@media(max-width:900px){.slot-grid{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:500px){.slot-grid{grid-template-columns:1fr}}
+.slot-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+@media(max-width:1100px){.slot-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){.slot-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:420px){.slot-grid{grid-template-columns:1fr}}
 .slot-card{background:#0e0e0e;border:1px solid #1e1e1e;border-radius:8px;padding:14px;min-height:130px;position:relative}
 .slot-card.live{border-color:#1a3a2a}
 .slot-card.empty{opacity:.55}
@@ -680,16 +684,21 @@ function renderFleet(pool) {
 
   const grid = document.getElementById('fleet-slots');
   let html = '';
-  for (let i = 0; i < 4; i++) {
-    const s = slots[String(i)];
-    const port = s ? (s.port || (7434 + (i===0?0:i))) : (7434 + (i===0?0:i));
-    const pnl  = s ? (s.daily_pnl||0) : 0;
-    const pnlStr = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
-    const pnlCls = pnl >= 0 ? 'g' : 'r';
-    const name   = 'fleetedge' + (i + 1);
+  const SLOT_PORTS = [7434, 7435, 7436, 7437, 7438];
+  const SLOT_NAMES = ['fleetedge1','fleetedge2','fleetedge3','fleetedge4','fleetedge5'];
+  for (let i = 0; i < 5; i++) {
+    const s       = slots[String(i)];
+    const port    = s ? (s.port || SLOT_PORTS[i]) : SLOT_PORTS[i];
+    const pnl     = s ? (s.daily_pnl||0) : 0;
+    const pnlStr  = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+    const pnlCls  = pnl >= 0 ? 'g' : 'r';
+    const name    = SLOT_NAMES[i];
+    const isEma   = i === 4;
+    const slotLbl = isEma ? `Slot ${i} · EMA Cross` : `Slot ${i}`;
+    const dotClr  = isEma ? '#00e5ff' : '#9c27b0';
     if (s) {
-      html += `<div class="slot-card live">
-        <div class="slot-num">Slot ${i} &nbsp;&#9679;&nbsp; :${port}</div>
+      html += `<div class="slot-card live" style="${isEma ? 'border-color:#003a4a' : ''}">
+        <div class="slot-num">${slotLbl} &nbsp;&#9679;&nbsp; :${port}</div>
         <div class="slot-sym active">${s.symbol || '—'}</div>
         <div class="slot-meta">
           Open: $${(s.open_usdt||0).toFixed(2)}<br>
@@ -697,18 +706,18 @@ function renderFleet(pool) {
         </div>
         <div class="slot-actions">
           <button class="btn btn-open" onclick="window.open('/agent/${name}/','_blank')">&#9654; Dashboard</button>
-          <button id="ai-btn-${name}" class="btn" onclick="toggleAI('${name}','${port}')"
-            style="font-size:.65rem;padding:4px 8px;background:#0a0f0a;border:1px solid #1a3a1a;color:#4caf50;cursor:pointer">&#9632; Analyst</button>
+          ${!isEma ? `<button id="ai-btn-${name}" class="btn" onclick="toggleAI('${name}','${port}')"
+            style="font-size:.65rem;padding:4px 8px;background:#0a0f0a;border:1px solid #1a3a1a;color:#4caf50;cursor:pointer">&#9632; Analyst</button>` : ''}
           <button class="btn btn-stop" onclick="stopAgent('${name}')" style="padding:6px 10px;font-size:.68rem">&#9646;&#9646;</button>
         </div>
       </div>`;
     } else {
-      html += `<div class="slot-card empty">
-        <div class="slot-num">Slot ${i} &nbsp;&#9675;&nbsp; :${port}</div>
-        <div class="slot-sym" style="color:#333">empty</div>
+      html += `<div class="slot-card empty" style="${isEma ? 'border-color:#003a4a;opacity:.65' : ''}">
+        <div class="slot-num">${slotLbl} &nbsp;&#9675;&nbsp; :${port}</div>
+        <div class="slot-sym" style="color:#333">${isEma ? 'EMA Cross' : 'empty'}</div>
         <div class="slot-meta" style="color:#333">—<br>—</div>
         <div class="slot-actions">
-          <button class="btn btn-spawn" onclick="spawnSlot(${i})" style="font-size:.68rem">&#9654; Spawn</button>
+          <button class="btn btn-spawn" onclick="${isEma ? 'spawnEmaSlot()' : 'spawnSlot('+i+')'}" style="font-size:.68rem">&#9654; Spawn</button>
         </div>
       </div>`;
     }
@@ -746,6 +755,20 @@ async function spawnSlot(slot) {
     document.getElementById('spawn-msg').textContent = `✓ Slot ${slot} spawned: ${agent.symbol}`;
     setTimeout(() => document.getElementById('spawn-msg').textContent = '', 4000);
   }
+  loadAgents(); loadPool();
+}
+
+async function spawnEmaSlot() {
+  const msg = document.getElementById('spawn-msg');
+  msg.textContent = '⚡ Launching EMA Cross agent…';
+  const r = await fetch('/api/spawn', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({name:'fleetedge5', mode:'live', port:7438, symbol:'ETHUSDT', slot:4, strategy:'ema_cross'}),
+  });
+  const d = await r.json();
+  msg.textContent = d.error ? '✗ ' + d.error : '✓ EMA Cross agent started on :7438';
+  setTimeout(() => msg.textContent = '', 5000);
   loadAgents(); loadPool();
 }
 
@@ -951,12 +974,13 @@ class AgentManager:
         return web.json_response(_available_coins)
 
     async def _spawn(self, request: web.Request):
-        body   = await request.json()
-        name   = body.get("name", "").strip()
-        mode   = body.get("mode", "testnet")
-        port   = int(body.get("port", MODE_META.get(mode, (7432,))[0]))
-        symbol = body.get("symbol", "BTCUSDT").upper().strip() or "BTCUSDT"
-        slot   = int(body.get("slot", 0))
+        body     = await request.json()
+        name     = body.get("name", "").strip()
+        mode     = body.get("mode", "testnet")
+        port     = int(body.get("port", MODE_META.get(mode, (7432,))[0]))
+        symbol   = body.get("symbol", "BTCUSDT").upper().strip() or "BTCUSDT"
+        slot     = int(body.get("slot", 0))
+        strategy = body.get("strategy", "momentum")
 
         if not name:
             return web.json_response({"error": "name required"}, status=400)
@@ -967,7 +991,7 @@ class AgentManager:
         if name in _agents and _pid_alive(_agents[name].get("pid", 0)):
             return web.json_response({"error": f"{name} already running"}, status=409)
 
-        info = _spawn(name, mode, port, symbol, slot=slot)
+        info = _spawn(name, mode, port, symbol, slot=slot, strategy=strategy)
         if not info:
             return web.json_response({"error": "failed to spawn"}, status=500)
         return web.json_response({"ok": True, **info})
@@ -1138,7 +1162,22 @@ class AgentManager:
             else:
                 spawned.append({"slot": slot, "name": name, "status": "failed"})
 
-        return {"ok": True, "agents": spawned, "top4": top4}
+        # Slot 4 — EMA Crossover agent (FIX-4: ETHUSDT, not BTCUSDT — avoids double BTC exposure with slot 0)
+        ema_name = "fleetedge5"
+        ema_port = LIVE_PORTS[4]
+        ema_sym  = "ETHUSDT"
+        if ema_name in _agents and _pid_alive(_agents[ema_name].get("pid", 0)):
+            spawned.append({"slot": 4, "name": ema_name, "status": "already_running",
+                            "symbol": _agents[ema_name].get("symbol", ema_sym)})
+        else:
+            info = _spawn(ema_name, "live", ema_port, ema_sym, slot=4, strategy="ema_cross")
+            if info:
+                spawned.append({"slot": 4, "name": ema_name, "status": "spawned",
+                                "symbol": ema_sym, "port": ema_port})
+            else:
+                spawned.append({"slot": 4, "name": ema_name, "status": "failed"})
+
+        return {"ok": True, "agents": spawned, "top4": top4 + [ema_sym]}
 
     async def _spawn_fleet(self, request: web.Request) -> web.Response:
         """HTTP handler — delegates to _do_spawn_fleet."""

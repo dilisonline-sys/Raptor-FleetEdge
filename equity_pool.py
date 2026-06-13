@@ -23,7 +23,8 @@ def _read() -> dict:
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
     except Exception:
-        return {"slots": {str(i): None for i in range(4)}, "ts": 0, "usdt_free": 0.0}
+        # FIX-17: default to FLEET_SIZE slots (5) so slot 4 (EMA cross) has a budget entry
+        return {"slots": {str(i): None for i in range(cfg.FLEET_SIZE)}, "ts": 0, "usdt_free": 0.0}
 
 
 def _write(state: dict):

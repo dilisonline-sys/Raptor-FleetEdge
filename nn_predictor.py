@@ -27,8 +27,10 @@ EPOCHS     = 60
 BATCH      = 32
 LR         = 3e-3
 
-CONF_FLOOR = 0.55   # minimum P(up) to let a BUY signal through the NN gate
-RETRAIN_EVERY = 100  # retrain every N main-loop cycles (≈ 100 min on 1-min cycle)
+CONF_FLOOR    = 0.55   # minimum P(up) to let a BUY signal through the NN gate
+OOS_MIN_ACC   = 0.58   # NH-2: gate only activates when OOS accuracy > 58% AND test set ≥ 50 samples
+OOS_MIN_SAMP  = 50     # NH-2: below this, OOS accuracy is statistically noise (CI spans ±16%)
+RETRAIN_EVERY = 100    # retrain every N main-loop cycles (≈ 100 min on 1-min cycle)
 
 
 class PricePredictor:
@@ -52,6 +54,8 @@ class PricePredictor:
 
         self.is_trained   = False
         self.train_acc    = 0.0
+        self.oos_acc      = 0.0   # FIX-3: out-of-sample accuracy — the only reliable gate metric
+        self.oos_samples  = 0     # NH-2: test set size — gate only activates when ≥ OOS_MIN_SAMP
         self.symbol       = "?"
         self._train_count = 0
 
@@ -191,50 +195,69 @@ class PricePredictor:
 
     # ── Training ─────────────────────────────────────────────────────────────
     def train(self, df: pd.DataFrame, symbol: str = "?") -> float:
-        """Fit the network on historical candles.  Returns final training accuracy."""
+        """Fit the network on historical candles.  Returns out-of-sample accuracy.
+
+        FIX-3: 80/20 train/test split with OOS accuracy tracking.
+        In-sample accuracy (train_acc) was always ~100% due to overfitting on 188 samples.
+        OOS accuracy (oos_acc) is the only meaningful metric for the NN gate.
+        """
         self.symbol = symbol
         X, y = self._make_dataset(df)
 
-        if X is None or len(X) < 30:
+        if X is None or len(X) < 40:
             log("NN", "TRAIN_SKIPPED", symbol=symbol,
                 reason="insufficient_samples", have=0 if X is None else len(X))
             return 0.5
 
-        # Z-score normalisation fitted on training data
-        self._mu  = X.mean(axis=0)
-        self._std = X.std(axis=0) + 1e-8
-        Xn = (X - self._mu) / self._std
+        # 80/20 chronological split — test set is always the most recent samples
+        split    = int(len(X) * 0.80)
+        X_tr, y_tr = X[:split], y[:split]
+        X_te, y_te = X[split:], y[split:]
 
-        # Fresh Adam moments for each retrain (stale moments from previous coin
-        # would corrupt the gradient estimates for a new symbol's distribution)
+        # Z-score normalisation fitted ONLY on training data (no leakage)
+        self._mu  = X_tr.mean(axis=0)
+        self._std = X_tr.std(axis=0) + 1e-8
+        Xn_tr = (X_tr - self._mu) / self._std
+        Xn_te = (X_te - self._mu) / self._std
+
+        # Fresh Adam moments for each retrain
         self._init_adam()
 
         rng = np.random.default_rng(self._train_count)
 
         for _ in range(EPOCHS):
-            idx = rng.permutation(len(Xn))
-            for s in range(0, len(Xn), BATCH):
+            idx = rng.permutation(len(Xn_tr))
+            for s in range(0, len(Xn_tr), BATCH):
                 b   = idx[s:s + BATCH]
-                p   = self._forward(Xn[b], store=True)
-                g   = self._backward(Xn[b], y[b], p)
+                p   = self._forward(Xn_tr[b], store=True)
+                g   = self._backward(Xn_tr[b], y_tr[b], p)
                 self._adam_step(g)
 
-        # Final accuracy report
-        p_all     = self._forward(Xn, store=False).flatten()
-        final_acc = float(((p_all > 0.5) == y.astype(bool)).mean())
+        # In-sample accuracy (informational only — will be high due to small dataset)
+        p_tr      = self._forward(Xn_tr, store=False).flatten()
+        train_acc = float(((p_tr > 0.5) == y_tr.astype(bool)).mean())
 
-        self.train_acc    = final_acc
+        # Out-of-sample accuracy — the only metric the NN gate should use
+        p_te    = self._forward(Xn_te, store=False).flatten()
+        oos_acc = float(((p_te > 0.5) == y_te.astype(bool)).mean()) if len(y_te) else 0.5
+
+        self.train_acc    = train_acc
+        self.oos_acc      = oos_acc
+        self.oos_samples  = len(X_te)   # NH-2: gate caller checks this before trusting oos_acc
         self.is_trained   = True
         self._train_count += 1
 
+        gate_ok = oos_acc >= OOS_MIN_ACC and len(X_te) >= OOS_MIN_SAMP
         log("NN", "TRAINED",
             symbol=symbol,
-            samples=len(X),
-            epochs=EPOCHS,
-            accuracy=round(final_acc * 100, 1),
+            train_samples=split,
+            test_samples=len(X_te),
+            train_acc=round(train_acc * 100, 1),
+            oos_acc=round(oos_acc * 100, 1),
+            gate_active=gate_ok,
             run=self._train_count)
 
-        return final_acc
+        return oos_acc  # gate callers should use this
 
     # ── Inference ────────────────────────────────────────────────────────────
     def predict(self, df: pd.DataFrame) -> float:

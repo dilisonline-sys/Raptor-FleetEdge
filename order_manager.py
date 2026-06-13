@@ -307,14 +307,16 @@ class OrderManager:
                 fill_price=fill_price, status=result.get("status"), symbol=sym)
         return result
 
-    async def cancel_all(self):
+    async def cancel_all(self, symbol: str | None = None):
+        # FIX-1: accept active symbol so callers don't silently cancel the wrong pair
+        sym = symbol or cfg.SYMBOL
         await self._ensure_session()
-        params = {"symbol": cfg.SYMBOL, "timestamp": int(time.time() * 1000), "recvWindow": 5000}
+        params = {"symbol": sym, "timestamp": int(time.time() * 1000), "recvWindow": 5000}
         params["signature"] = _sign(params)
         async with self._session.delete(
             cfg.SPOT_BASE_URL + "/api/v3/openOrders", params=params
         ) as r:
-            log("MODULE_7", "CANCEL_ALL_ORDERS", status=r.status)
+            log("MODULE_7", "CANCEL_ALL_ORDERS", symbol=sym, status=r.status)
 
     async def close(self):
         if self._session:

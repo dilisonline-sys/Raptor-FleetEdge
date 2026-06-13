@@ -8,6 +8,8 @@ import pandas_ta as ta
 from logger import log
 import config as cfg
 
+_WS_STALE_SEC = 10  # FIX-8: fall back to REST if WS hasn't updated in this many seconds
+
 
 class MarketData:
     def __init__(self, symbol: str, interval: str):
@@ -15,9 +17,11 @@ class MarketData:
         self.interval = interval
         self._session: aiohttp.ClientSession | None = None
         # WS-backed caches (None = not yet received, falls back to REST)
-        self._ws_ticker: dict | None = None
-        self._ws_book:   dict | None = None
-        self._ws_tasks:  list        = []
+        self._ws_ticker:    dict | None = None
+        self._ws_book:      dict | None = None
+        self._ws_tasks:     list        = []
+        self._ws_ticker_ts: float       = 0.0   # FIX-8: last update timestamp for staleness check
+        self._ws_book_ts:   float       = 0.0
 
     async def connect(self):
         self._session = aiohttp.ClientSession()
@@ -30,10 +34,11 @@ class MarketData:
     # ── WebSocket background streams ──────────────────────────────────────────
 
     async def _ws_ticker_loop(self):
+        # FIX-16: infinite reconnect with capped exponential backoff (no give-up after 4 fails)
         sym  = self.symbol.lower()
         url  = f"wss://stream.binance.com:9443/ws/{sym}@ticker"
         fail = 0
-        while fail < 4:
+        while True:
             try:
                 async with self._session.ws_connect(
                     url, heartbeat=20, timeout=aiohttp.ClientTimeout(total=None)
@@ -50,6 +55,7 @@ class MarketData:
                                 "high":        float(d["h"]),
                                 "low":         float(d["l"]),
                             }
+                            self._ws_ticker_ts = time.monotonic()  # FIX-8: stamp every update
                         elif msg.type in (
                             aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR
                         ):
@@ -57,16 +63,16 @@ class MarketData:
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                fail += 1
+                fail = min(fail + 1, 8)  # cap for sleep calculation
                 log("MODULE_1", "WS_TICKER_ERR", attempt=fail, error=str(e)[:80])
-            await asyncio.sleep(min(5 * fail, 30))
-        log("MODULE_1", "WS_TICKER_DISABLED", reason="too many failures — using REST fallback")
+            await asyncio.sleep(min(5 * fail, 60))
 
     async def _ws_book_loop(self):
+        # FIX-16: infinite reconnect with capped exponential backoff
         sym  = self.symbol.lower()
         url  = f"wss://stream.binance.com:9443/ws/{sym}@bookTicker"
         fail = 0
-        while fail < 4:
+        while True:
             try:
                 async with self._session.ws_connect(
                     url, heartbeat=20, timeout=aiohttp.ClientTimeout(total=None)
@@ -87,6 +93,7 @@ class MarketData:
                                 "spread_pct": spread_pct,
                                 "imbalance":  prev_imb,
                             }
+                            self._ws_book_ts = time.monotonic()
                         elif msg.type in (
                             aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR
                         ):
@@ -94,10 +101,9 @@ class MarketData:
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                fail += 1
+                fail = min(fail + 1, 8)
                 log("MODULE_1", "WS_BOOK_ERR", attempt=fail, error=str(e)[:80])
-            await asyncio.sleep(min(5 * fail, 30))
-        log("MODULE_1", "WS_BOOK_DISABLED", reason="too many failures — using REST fallback")
+            await asyncio.sleep(min(5 * fail, 60))
 
     # ── REST helpers ──────────────────────────────────────────────────────────
 
@@ -114,9 +120,15 @@ class MarketData:
     # ── Public data methods ───────────────────────────────────────────────────
 
     async def get_ticker(self) -> dict:
-        if self._ws_ticker is not None:
+        # FIX-8: fall back to REST if WS data is stale (disconnected but dict not None)
+        if (self._ws_ticker is not None
+                and (time.monotonic() - self._ws_ticker_ts) < _WS_STALE_SEC):
             return self._ws_ticker
-        # REST fallback (first cycle before WS warms up)
+        if self._ws_ticker is not None and self._ws_ticker_ts > 0:
+            log("MODULE_1", "WS_TICKER_STALE",
+                age_sec=round(time.monotonic() - self._ws_ticker_ts, 1),
+                fallback="REST")
+        # REST fallback (first cycle before WS warms up, or when WS is stale)
         data = await self._get(cfg.PUBLIC_DATA_URL, "/api/v3/ticker/24hr",
                                {"symbol": self.symbol})
         return {

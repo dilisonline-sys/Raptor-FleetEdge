@@ -30,6 +30,7 @@ from logger import log
 import config as cfg
 import email_notifier as _email
 import equity_pool as _ep
+import ema_cross_module as _ema_cross
 from rule_analyst import RuleAnalyst
 from rule_coin_selector import RuleCoinSelector
 from nn_predictor import PricePredictor
@@ -211,12 +212,13 @@ async def main_loop():
     em       = ExitManager()
     rc       = RegimeClassifier()
     fg       = FearGreedClient()
-    analyst   = RuleAnalyst()
-    selector  = RuleCoinSelector()
-    predictor = PricePredictor()
-    queue       = asyncio.Queue()
     _agent_slot = int(os.environ.get("AGENT_SLOT", "0"))
     _agent_name = os.environ.get("AGENT_NAME", f"fleetedge{_agent_slot + 1}")
+    _strategy   = os.environ.get("AGENT_STRATEGY", "momentum").lower()
+    analyst   = RuleAnalyst()
+    selector  = RuleCoinSelector()
+    # NM-3: predictor is never used by ema_cross — skip heavy numpy weight init for that strategy
+    predictor = PricePredictor() if _strategy != "ema_cross" else None
     _wake      = asyncio.Event()
     server     = InstructionServer(queue)
     set_wake_event(_wake)
@@ -327,7 +329,12 @@ async def main_loop():
     _env_symbol = os.environ.get("AGENT_SYMBOL", "").upper().strip()
     _start_sym  = _env_symbol or cfg.SYMBOL
 
-    if cfg.USE_DEMO:
+    if _strategy == "ema_cross":
+        # EMA cross: lock permanently to assigned coin, never rotates.
+        # NC-4: default ETHUSDT (not BTCUSDT) to avoid double BTC exposure with slot 0
+        active_symbol = _env_symbol or "ETHUSDT"
+        update_state(coin_mode=active_symbol)
+    elif cfg.USE_DEMO:
         active_symbol = _start_sym
         update_state(coin_mode=active_symbol)  # demo locks to specified coin
     elif cfg.TRADING_MODE == "live":
@@ -379,15 +386,17 @@ async def main_loop():
                 log("SCANNER", "BG_ERROR", error=str(e)[:80])
             await asyncio.sleep(60)
 
-    asyncio.create_task(_background_scanner())
+    # FIX-13: EMA cross is locked to one coin and never rotates — scanner wastes API rate limit
+    if _strategy != "ema_cross":
+        asyncio.create_task(_background_scanner())
 
 
+    _prev_indicators:    dict | None = None  # EMA cross: previous cycle's indicators
     pending_override:    str | None = None
     pending_force_coin:  str | None = None  # force-switch target (closes position first)
     volatile_since:      float      = 0.0   # when current coin first entered VOLATILE
     gate_fail_streak:    int        = 0     # consecutive quality gate failures
     none_signal_streak:  int        = 0     # consecutive NONE-signal cycles (no trade setup)
-    _ranked_idx:         int        = 0     # which scanner.ranked slot we're currently on
     _pool_open_usdt:     float      = 0.0   # cached open USDT — reported to pool every cycle start
     _pool_pnl:           float      = 0.0   # cached daily pnl — reported to pool every cycle start
     _orphan_checked:     bool       = False  # one-shot: recover orphaned base-asset positions on restart
@@ -432,15 +441,45 @@ async def main_loop():
             log("AGENT", "PRE_SWITCH_SELL_ERROR", symbol=symbol, error=str(_liq_e))
 
     log("AGENT", "READY", symbol=active_symbol, testnet=cfg.USE_TESTNET, equity=round(equity, 2))
-    _session_start_equity  = equity         # baseline for session P&L % only
+    # FIX-12: persist session start equity across restarts within the same calendar day
+    import datetime as _dt
+    _session_eq_file = f"/tmp/rfe_session_start_{_agent_slot}_{_dt.date.today()}.json"
+    _session_start_equity = equity
+    try:
+        if os.path.exists(_session_eq_file):
+            _ses_data = json.load(open(_session_eq_file))
+            if _ses_data.get("equity", 0) > 0:
+                _session_start_equity = float(_ses_data["equity"])
+    except Exception:
+        pass
+    try:
+        json.dump({"equity": _session_start_equity}, open(_session_eq_file, "w"))
+    except Exception:
+        pass
+    # NH-3: clean up session equity files from previous calendar days
+    try:
+        import glob as _glob
+        _today_str = str(_dt.date.today())
+        for _old_f in _glob.glob(f"/tmp/rfe_session_start_{_agent_slot}_*.json"):
+            if _today_str not in _old_f:
+                os.remove(_old_f)
+    except Exception:
+        pass
     _session_realized_pnl  = 0.0           # sum of all closed-trade P&L this session
     _session_start_ts      = _time.time()
+    # FIX-14: track session open price for a more accurate intraday BTC range guard
+    _session_open_price: float = 0.0
+    _session_high:       float = 0.0
+    _session_low:        float = float("inf")
     _ai_sel_triggered      = False          # one-shot: fired when session P&L ≤ 0, resets on recovery
     _ai_sel_pending_ts     = 0.0           # stagger: slot N waits N×20s before firing
+    _strategy_label = ("EMA Cross · Crossover" if _strategy == "ema_cross"
+                       else "Volatility Chase · Momentum Only")
     update_state(equity=equity, symbol=active_symbol,
                  session_start_equity=round(_session_start_equity, 2),
                  session_start_ts=_session_start_ts,
-                 session_pnl=0.0, session_pnl_pct=0.0)
+                 session_pnl=0.0, session_pnl_pct=0.0,
+                 strategy=_strategy_label)
 
     # ── Staggered startup: let earlier slots register in pool before this one
     # scans for a coin, preventing all agents from picking the same top coin simultaneously.
@@ -505,6 +544,10 @@ async def main_loop():
 
     while True:
         try:
+            # EMA cross: snapshot prev indicators at loop top before any continue can fire
+            _ema_prev        = _prev_indicators
+            _prev_indicators = None  # will be set after indicators are computed
+
             # Heartbeat to equity pool using values from previous cycle (fires on every iteration)
             _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
 
@@ -522,9 +565,9 @@ async def main_loop():
                     log("AGENT", "RESUMED", source=instr.get("source",""), prev_reason=_prev_reason)
                     update_state(halt=False)
                 elif action == "HALT":
-                    await risk.emergency_halt(om, "operator_halt", equity)
+                    await risk.emergency_halt(om, "operator_halt", equity, symbol=active_symbol)
                 elif action == "CLOSE_ALL":
-                    await om.cancel_all()
+                    await om.cancel_all(symbol=active_symbol)
                     if em.positions:
                         try:
                             _close_price = (await md.get_ticker())["price"]
@@ -534,7 +577,13 @@ async def main_loop():
                                 _close_ord = await om.submit("SELL", _base_bal, _close_tick,
                                                              {}, symbol=active_symbol)
                                 if _close_ord:
-                                    push_log(f"[CLOSE_ALL] Market sell submitted: qty={round(_base_bal,6)} @ ~{_close_price:.6f}")
+                                    # NC-3: check fill before clearing — partial fill leaves orphaned coin
+                                    _ca_status = _close_ord.get("status", "FILLED")
+                                    if _ca_status == "PARTIALLY_FILLED":
+                                        _ca_exec = float(_close_ord.get("executedQty", 0))
+                                        push_log(f"[CLOSE_ALL] ⚠ PARTIAL fill: {_ca_exec:.6f}/{_base_bal:.6f} sold — remainder unmanaged until next restart")
+                                    else:
+                                        push_log(f"[CLOSE_ALL] Market sell submitted: qty={round(_base_bal,6)} @ ~{_close_price:.6f}")
                         except Exception as _ce:
                             push_log(f"[CLOSE_ALL] Sell submit error: {_ce}")
                     em.positions.clear()
@@ -557,7 +606,7 @@ async def main_loop():
                         update_state(trading_mode=new_mode)
                         push_log(f"[MODE_SWITCH] → {new_mode.upper()} | {ep[0]}")
                         log("AGENT", "MODE_SWITCH", mode=new_mode, url=ep[0])
-                        await om.cancel_all()
+                        await om.cancel_all(symbol=active_symbol)
                         em.positions.clear()
                     else:
                         push_log(f"[MODE_SWITCH] rejected — unknown mode: {new_mode}")
@@ -624,9 +673,11 @@ async def main_loop():
             # NOT switch coins automatically. Manual SWITCH_COIN instruction still works.
             coin_mode = _state.get("coin_mode", "auto")
             if not em.positions:
-                top5 = [r["symbol"] for r in scanner.ranked[:5]]
-                update_state(top_coins=top5)
-                push_log(f"[COIN] Holding {active_symbol} | scanner top5={top5}")
+                # NM-4: scanner is not started for ema_cross — suppress misleading "top5=[]" log
+                if _strategy != "ema_cross" and scanner.ranked:
+                    top5 = [r["symbol"] for r in scanner.ranked[:5]]
+                    update_state(top_coins=top5)
+                    push_log(f"[COIN] Holding {active_symbol} | scanner top5={top5}")
 
             # ── Module 1: Market Data ─────────────────────────────
             try:
@@ -639,6 +690,19 @@ async def main_loop():
                 log("AGENT", "DATA_ERROR", symbol=active_symbol, error=str(e))
                 await _cycle_sleep()
                 continue
+
+            # FIX-14: track session open / high / low for accurate intraday BTC range guard
+            if _session_open_price == 0.0:
+                _session_open_price = current_price
+            _session_high = max(_session_high, current_price)
+            _session_low  = min(_session_low,  current_price)
+
+            # FIX-7: EMA cross uses closed-candle indicators (strip WS-patched live candle)
+            # to avoid phantom crossovers from intra-candle price noise.
+            _closed_indicators = md.compute_indicators(candles.iloc[:-1]) if _strategy == "ema_cross" else indicators
+
+            # EMA cross: persist closed-candle indicators for next cycle's crossover comparison
+            _prev_indicators = dict(_closed_indicators)
 
             if not md.quality_gate(tick, book):
                 gate_fail_streak += 1
@@ -668,18 +732,24 @@ async def main_loop():
             gate_fail_streak = 0
 
             # ── NN model: retrain when symbol changes or interval elapses ────
-            _nn_cycle_count += 1
-            if (not predictor.is_trained
-                    or predictor.symbol != active_symbol
-                    or _nn_cycle_count >= 100):
-                try:
-                    _nn_acc = predictor.train(candles, active_symbol)
-                    _nn_cycle_count = 0
-                    update_state(nn_accuracy=round(_nn_acc * 100, 1))
-                    push_log(f"[NN] Model retrained on {active_symbol} — "
-                             f"accuracy={_nn_acc*100:.1f}%  (samples≈{len(candles)-12})")
-                except Exception as _nn_e:
-                    log("NN", "TRAIN_ERROR", symbol=active_symbol, error=str(_nn_e)[:120])
+            # NM-3: predictor is None for ema_cross agents — skip block entirely
+            if _strategy != "ema_cross" and predictor is not None:
+                _nn_cycle_count += 1
+                if (not predictor.is_trained
+                        or predictor.symbol != active_symbol
+                        or _nn_cycle_count >= 100):
+                    try:
+                        # FIX-9: run_in_executor prevents NN training from blocking the async loop
+                        _nn_acc = await asyncio.get_event_loop().run_in_executor(
+                            None, predictor.train, candles, active_symbol)
+                        _nn_cycle_count = 0
+                        update_state(nn_accuracy=round(_nn_acc * 100, 1),
+                                     nn_oos_acc=round(predictor.oos_acc * 100, 1))
+                        push_log(f"[NN] Retrained {active_symbol} — "
+                                 f"train={predictor.train_acc*100:.1f}%  "
+                                 f"OOS={predictor.oos_acc*100:.1f}%  (samples≈{len(candles)-12})")
+                    except Exception as _nn_e:
+                        log("NN", "TRAIN_ERROR", symbol=active_symbol, error=str(_nn_e)[:120])
 
             # ── Orphan recovery: reconstruct position from existing balance ──
             if not _orphan_checked:
@@ -692,9 +762,12 @@ async def main_loop():
                     _tp1_dist = _h1r * 0.40 if _h1r > 0 else _atr * cfg.ATR_STOP_MULT * cfg.TP1_R
                     _tp2_dist = _h1r * 0.80 if _h1r > 0 else _atr * cfg.ATR_STOP_MULT * cfg.TP2_R
                     _tp3_dist = _h1r * 1.25 if _h1r > 0 else _atr * cfg.ATR_STOP_MULT * cfg.TP3_R
+                    # FIX-10: synthetic position uses current price as avg_entry (actual entry unknown).
+                    # Stop is widened to 1.5×ATR so an upward-shifted entry doesn't prematurely
+                    # stop out a position that was actually entered lower. Review manually via dashboard.
                     _sp  = Position(
                         side="BUY", avg_entry=current_price, qty=_bb,
-                        stop=round(current_price - _atr * cfg.ATR_STOP_MULT, 2),
+                        stop=round(current_price - _atr * cfg.ATR_STOP_MULT * 1.5, 2),  # wider stop for synthetic
                         tp1=round(current_price + _tp1_dist, 2),
                         tp2=round(current_price + _tp2_dist, 2),
                         tp3=round(current_price + _tp3_dist, 2),
@@ -702,11 +775,12 @@ async def main_loop():
                         symbol=active_symbol,
                     )
                     em.positions.append(_sp)
-                    push_log(f"[RECOVERY] Orphaned {round(_bb,6)} {active_symbol[:-4]} detected "
-                             f"— synthetic position created at {current_price:.2f} "
-                             f"| stop={_sp.stop} | tp1={_sp.tp1}")
+                    push_log(f"[RECOVERY] ⚠ SYNTHETIC POSITION — entry={current_price:.4f} is CURRENT PRICE not actual fill. "
+                             f"Stop widened to 1.5×ATR. Review manually. "
+                             f"qty={round(_bb,6)} {active_symbol[:-4]} | stop={_sp.stop} | tp1={_sp.tp1}")
                     log("AGENT", "ORPHAN_RECOVERY", symbol=active_symbol,
-                        qty=round(_bb, 6), price=current_price, stop=_sp.stop, tp1=_sp.tp1)
+                        qty=round(_bb, 6), synthetic_entry=current_price, stop=_sp.stop, tp1=_sp.tp1,
+                        warning="actual_fill_price_unknown")
 
             # ── Push chart data ───────────────────────────────────
             try:
@@ -760,13 +834,16 @@ async def main_loop():
                                  candles, regime, fear_greed, _pos_info)
                 )
 
+            # NC-5: EMA cross blocks new entries during VOLATILE (flash crash / liquidity crisis).
+            # Crossovers during 5%+ ATR moves are noise not trend. Open positions still managed.
+            if regime == "VOLATILE" and not em.positions and _strategy == "ema_cross":
+                push_log(f"[EMA_CROSS] VOLATILE regime — no new entries (flash-crash guard)")
+                await _cycle_sleep()
+                continue
+
             # ── RANGING / VOLATILE with no position: rotate if stuck ────────
-            # Old code did a bare `continue` here, which skipped none_signal_streak
-            # increment and the rotation block — agent would never leave a RANGING coin.
-            # Fixed: increment streak and rotate after NONE_SIGNAL_ROTATE cycles,
-            # same as the main rotation block.  VOLATILE *with* an open position falls
-            # through so that TP/stop management still runs.
-            if regime in ("RANGING", "VOLATILE") and not em.positions:
+            # Momentum strategy skips RANGING/VOLATILE to avoid noise.
+            if regime in ("RANGING", "VOLATILE") and not em.positions and _strategy != "ema_cross":
                 none_signal_streak += 1
                 push_log(f"[{regime}] {active_symbol} — no-entry | streak={none_signal_streak}")
                 if (none_signal_streak >= NONE_SIGNAL_ROTATE
@@ -790,7 +867,7 @@ async def main_loop():
                         _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
                         update_state(symbol=active_symbol, coin_mode="auto")
                         none_signal_streak = 0
-                        _ranked_idx = 0
+
                 await _cycle_sleep()
                 continue
             # VOLATILE *with* open position: falls through to manage_open_positions below
@@ -807,13 +884,32 @@ async def main_loop():
                         close_order = await om.submit("SELL", base_bal, tick, indicators,
                                                       symbol=active_symbol)
                         if close_order:
-                            push_log(f"[EXIT_EXECUTED] SELL {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
-                            asyncio.create_task(asyncio.to_thread(
-                                _email.notify_fill, _agent_name, active_symbol, "SELL", base_bal, current_price))
+                            # Fix-6 complete: check fill status — partial fill leaves orphaned coin
+                            _ex_status = close_order.get("status", "FILLED")
+                            if _ex_status == "PARTIALLY_FILLED":
+                                _ex_exec = float(close_order.get("executedQty", 0))
+                                _ex_rem  = base_bal - _ex_exec
+                                if _ex_rem * current_price > 10:
+                                    # Re-add a synthetic position for the unsold remainder
+                                    _rem_pos = Position(
+                                        side="BUY", avg_entry=current_price, qty=_ex_rem,
+                                        stop=round(current_price - indicators["atr14"], 2),
+                                        tp1=round(current_price + indicators["atr14"] * cfg.TP1_R, 2),
+                                        tp2=round(current_price + indicators["atr14"] * cfg.TP2_R, 2),
+                                        tp3=round(current_price + indicators["atr14"] * cfg.TP3_R, 2),
+                                        initial_risk=round(_ex_rem * indicators["atr14"], 4),
+                                        symbol=active_symbol,
+                                    )
+                                    em.positions.append(_rem_pos)
+                                    push_log(f"[PARTIAL_FILL] Exit {_ex_exec:.6f}/{base_bal:.6f} sold — {_ex_rem:.6f} remaining, position re-tracked")
+                            else:
+                                push_log(f"[EXIT_EXECUTED] SELL {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
+                                asyncio.create_task(asyncio.to_thread(
+                                    _email.notify_fill, _agent_name, active_symbol, "SELL", base_bal, current_price))
                 elif act.startswith("PARTIAL_CLOSE:BUY:TP1"):
-                    # Sell TP1_PCT of the position
                     base_bal = await om.get_base_balance(active_symbol)
-                    sell_qty = base_bal * cfg.TP1_PCT / (1 - cfg.TP1_PCT + cfg.TP1_PCT)
+                    # NM-1: (1 - TP1_PCT + TP1_PCT) = 1 always — simplified to bare TP1_PCT
+                    sell_qty = base_bal * cfg.TP1_PCT
                     if sell_qty > 0:
                         tp_order = await om.submit("SELL", sell_qty, tick, indicators,
                                                    symbol=active_symbol)
@@ -823,7 +919,9 @@ async def main_loop():
                                 _email.notify_fill, _agent_name, active_symbol, "SELL (TP1)", sell_qty, current_price))
                 elif act.startswith("PARTIAL_CLOSE:BUY:TP2"):
                     base_bal = await om.get_base_balance(active_symbol)
-                    sell_qty = base_bal * cfg.TP2_PCT / (1 - cfg.TP2_PCT + cfg.TP2_PCT)
+                    # NC-1: after TP1, base_bal is (1-TP1_PCT) of original.
+                    # To sell TP2_PCT of original: fraction of current balance = TP2_PCT / (1 - TP1_PCT)
+                    sell_qty = base_bal * (cfg.TP2_PCT / (1 - cfg.TP1_PCT))
                     if sell_qty > 0:
                         tp_order = await om.submit("SELL", sell_qty, tick, indicators,
                                                    symbol=active_symbol)
@@ -847,37 +945,53 @@ async def main_loop():
                 update_open_pos(None)
 
             # ── Signal ────────────────────────────────────────────
-            signal = signal_engine(indicators, regime, override=pending_override)
+            if _strategy == "ema_cross":
+                # FIX-7: pass _closed_indicators (prev completed candle) to avoid WS phantom signals
+                signal = _ema_cross.signal_engine(_closed_indicators, _ema_prev,
+                                                   override=pending_override)
+            else:
+                signal = signal_engine(indicators, regime, override=pending_override)
             pending_override = None
 
             # ── Neural network signal augmentation ───────────────────────────
-            # _nn_prob is computed once here and reused throughout the rest of the
-            # cycle (BUY initiation, SELL initiation, and the confirmation gate).
-            _nn_prob = predictor.predict(candles)
-            update_state(nn_confidence=round(_nn_prob * 100, 1))
-            NN_BUY_THRESHOLD  = 0.70   # initiates a BUY even when rule engine says NONE
-            NN_SELL_THRESHOLD = 0.30   # triggers protective exit on an open position
+            # Skipped for EMA cross — the crossover itself is the sole signal gate.
+            if _strategy == "ema_cross":
+                _nn_prob = 0.5  # neutral placeholder for dashboard display
+                update_state(nn_confidence=50.0)
+            else:
+                # _nn_prob is computed once here and reused throughout the rest of the
+                # cycle (BUY initiation, SELL initiation, and the confirmation gate).
+                _nn_prob = predictor.predict(candles)
+                update_state(nn_confidence=round(_nn_prob * 100, 1))
+                NN_BUY_THRESHOLD  = 0.70   # initiates a BUY even when rule engine says NONE
+                NN_SELL_THRESHOLD = 0.30   # triggers protective exit on an open position
 
-            # Promote NONE → BUY when NN is highly confident of an up-move in TRENDING
-            if (signal == "NONE"
-                    and not em.positions
-                    and regime == "TRENDING"
-                    and _nn_prob >= NN_BUY_THRESHOLD):
-                push_log(f"[NN] {active_symbol} up={_nn_prob:.1%} in TRENDING "
-                         f"— initiating BUY (subject to all gates)")
-                log("NN", "BUY_INITIATED", symbol=active_symbol, prob=round(_nn_prob, 3))
-                signal = "BUY"
+                # Promote NONE → BUY when NN is highly confident of an up-move in TRENDING
+                if (signal == "NONE"
+                        and not em.positions
+                        and regime == "TRENDING"
+                        and _nn_prob >= NN_BUY_THRESHOLD):
+                    push_log(f"[NN] {active_symbol} up={_nn_prob:.1%} in TRENDING "
+                             f"— initiating BUY (subject to all gates)")
+                    log("NN", "BUY_INITIATED", symbol=active_symbol, prob=round(_nn_prob, 3))
+                    signal = "BUY"
 
-            # Trigger early exit when NN strongly predicts a down-move on open position
-            if (signal != "SELL"
-                    and em.positions
-                    and _nn_prob <= NN_SELL_THRESHOLD):
-                push_log(f"[NN] {active_symbol} down={1 - _nn_prob:.1%} "
-                         f"— triggering protective exit on open position")
-                log("NN", "SELL_INITIATED", symbol=active_symbol, prob=round(_nn_prob, 3))
-                signal = "SELL"
+                # Trigger early exit when NN strongly predicts a down-move on open position
+                if (signal != "SELL"
+                        and em.positions
+                        and _nn_prob <= NN_SELL_THRESHOLD):
+                    push_log(f"[NN] {active_symbol} down={1 - _nn_prob:.1%} "
+                             f"— triggering protective exit on open position")
+                    log("NN", "SELL_INITIATED", symbol=active_symbol, prob=round(_nn_prob, 3))
+                    signal = "SELL"
 
             update_state(last_signal=signal)
+            # EMA cross: death cross with no position = just wait for next golden cross.
+            # Convert to NONE so rotation logic (below) is not triggered.
+            if _strategy == "ema_cross" and signal == "SELL" and not em.positions:
+                push_log(f"[EMA_CROSS] Death cross — no position open, waiting for golden cross")
+                signal = "NONE"
+
             # SELL with no open position is spot-untradeable — treat like NONE for rotation.
             # Without this, a bear-trending coin produces endless SELL signals and the agent
             # never rotates, since none_signal_streak stays at 0.
@@ -888,21 +1002,19 @@ async def main_loop():
                 push_log(f"[SIGNAL] {signal} on {active_symbol} | regime={regime} "
                          f"| nn={_nn_prob:.1%}")
                 none_signal_streak = 0
-                _ranked_idx        = 0
             else:
                 none_signal_streak += 1
                 push_log(f"[SIGNAL] NONE on {active_symbol} | regime={regime} "
                          f"| nn={_nn_prob:.1%} | streak={none_signal_streak}")
 
             # ── Auto coin rotation ─────────────────────────────────────────────
-            # Rotate when the coin is stuck (bear trend, RANGING, or no signal).
-            # _sell_no_pos  : coin is in bear trend; rotate after 1 cycle (can't short spot).
-            # none_signal_streak: RANGING/VOLATILE/no-setup — rotate after NONE_SIGNAL_ROTATE cycles.
+            # EMA cross stays on its assigned coin — crossover is the only gate.
             # slot 0 is BTC-locked; demo locks to its assigned coin.
             _can_rotate = (not em.positions
                            and _agent_slot != 0
                            and coin_mode == "auto"
-                           and scanner.ranked)
+                           and scanner.ranked
+                           and _strategy != "ema_cross")
             _should_rotate = (_sell_no_pos
                               or none_signal_streak >= NONE_SIGNAL_ROTATE)
             if _can_rotate and _should_rotate:
@@ -924,7 +1036,6 @@ async def main_loop():
                     _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
                     update_state(symbol=active_symbol, coin_mode="auto")
                     none_signal_streak = 0
-                    _ranked_idx        = 0
                     await _cycle_sleep()
                     continue
 
@@ -935,12 +1046,25 @@ async def main_loop():
                     close_order = await om.submit("SELL", base_bal, tick, indicators,
                                                   symbol=active_symbol)
                     if close_order:
-                        em.positions.clear()
-                        push_log(f"[MANUAL_SELL] Closed {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
-                        log("AGENT", "MANUAL_SELL_EXECUTED", symbol=active_symbol,
-                            qty=round(base_bal, 6), price=current_price)
-                        asyncio.create_task(asyncio.to_thread(
-                            _email.notify_fill, _agent_name, active_symbol, "SELL", base_bal, current_price))
+                        # FIX-6: check fill status before clearing positions (partial fills = ghost positions)
+                        _fill_status = close_order.get("status", "FILLED")
+                        if _fill_status == "FILLED":
+                            em.positions.clear()
+                            push_log(f"[MANUAL_SELL] Closed {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
+                            log("AGENT", "MANUAL_SELL_EXECUTED", symbol=active_symbol,
+                                qty=round(base_bal, 6), price=current_price)
+                            asyncio.create_task(asyncio.to_thread(
+                                _email.notify_fill, _agent_name, active_symbol, "SELL", base_bal, current_price))
+                        elif _fill_status == "PARTIALLY_FILLED":
+                            _exec_qty = float(close_order.get("executedQty", 0))
+                            _rem_qty  = base_bal - _exec_qty
+                            if em.positions and _rem_qty * current_price > 10:
+                                em.positions[0].qty = _rem_qty
+                                push_log(f"[PARTIAL_FILL] {_exec_qty:.6f}/{base_bal:.6f} {active_symbol[:-4]} sold — position qty reduced to {_rem_qty:.6f}")
+                            else:
+                                em.positions.clear()
+                        else:
+                            push_log(f"[CLOSE_WARN] Sell status={_fill_status} — position retained, will retry next cycle")
                 else:
                     push_log(f"[MANUAL_SELL] No {active_symbol[:-4]} balance to sell")
                     em.positions.clear()
@@ -968,10 +1092,15 @@ async def main_loop():
             # Only fires when exit_actions is non-empty (a close/TP actually happened),
             # not on every idle cycle — avoids spurious halts from transient API pricing
             # failures that make equity appear low when no trade occurred.
+            _full_close_pnl  = sum(pnl for act, pnl in exit_actions if act.startswith("CLOSE:"))
+            _had_full_close  = any(act.startswith("CLOSE:") for act, _ in exit_actions)
             if exit_actions and not em.positions:
                 try:
                     _post_close_equity = await om.get_equity(symbol=active_symbol, price=current_price)
                     risk.update_metrics(_post_close_equity)
+                    # Fix-2 gap: call record_trade for every full close including breakeven (pnl==0)
+                    if _had_full_close:
+                        risk.record_trade(_full_close_pnl, _post_close_equity)
                 except Exception as _eq_err:
                     log("AGENT", "EQUITY_FETCH_FAILED", error=str(_eq_err)[:160])
             if risk.halt_active():
@@ -996,27 +1125,29 @@ async def main_loop():
                     push_log(f"[COOLDOWN] {active_symbol} — {_wait}m left before re-entry allowed")
                     signal = "NONE"
 
-            # Solution 3: BTC daily-range guard.
-            # On low-volatility days (BTC 24h range < 1.5%), 15m trades cannot
-            # consistently beat the 0.15% fee threshold — the coin's entire daily
-            # range is only 10× the fee cost, leaving no margin for missed entries.
-            # We check once per cycle via the ticker (already fetched above).
+            # FIX-14: BTC session range guard (was 24h rolling which extends into yesterday).
+            # On low-volatility sessions (BTC session range < 1.5%), 15m trades cannot
+            # consistently beat the 0.15% fee threshold.
             if signal == "BUY" and not em.positions and active_symbol == "BTCUSDT":
-                _btc_high = tick.get("high", current_price)
-                _btc_low  = tick.get("low",  current_price)
                 _BTC_MIN_DAILY_RANGE = 0.015   # 1.5%
-                if _btc_low > 0:
-                    _btc_daily_range = (_btc_high - _btc_low) / _btc_low
-                    if _btc_daily_range < _BTC_MIN_DAILY_RANGE:
-                        push_log(
-                            f"[SKIP] BTCUSDT 24h range {_btc_daily_range:.2%} "
-                            f"< {_BTC_MIN_DAILY_RANGE:.1%} minimum — "
-                            f"flat market, fees would consume profit"
-                        )
-                        log("AGENT", "GATE_BLOCK_BTC_FLAT",
-                            daily_range_pct=round(_btc_daily_range * 100, 3),
-                            min_pct=_BTC_MIN_DAILY_RANGE * 100)
-                        signal = "NONE"
+                if _session_open_price > 0 and _session_low < float("inf"):
+                    # Use session range once we have enough price history
+                    _btc_session_range = (_session_high - _session_low) / _session_open_price
+                else:
+                    # Fallback to 24h ticker on very first cycle before session range builds
+                    _btc_h = tick.get("high", current_price)
+                    _btc_l = tick.get("low",  current_price)
+                    _btc_session_range = (_btc_h - _btc_l) / _btc_l if _btc_l > 0 else 1.0
+                if _btc_session_range < _BTC_MIN_DAILY_RANGE:
+                    push_log(
+                        f"[SKIP] BTCUSDT session range {_btc_session_range:.2%} "
+                        f"< {_BTC_MIN_DAILY_RANGE:.1%} minimum — "
+                        f"flat market, fees would consume profit"
+                    )
+                    log("AGENT", "GATE_BLOCK_BTC_FLAT",
+                        session_range_pct=round(_btc_session_range * 100, 3),
+                        min_pct=_BTC_MIN_DAILY_RANGE * 100)
+                    signal = "NONE"
 
             if signal == "BUY" and not em.positions:
                 try:
@@ -1036,11 +1167,14 @@ async def main_loop():
                 _tp1_atr_d   = stop_d * cfg.TP1_R
                 _tp1_h1_d    = _h1r * 0.40 if _h1r > 0 else 0
                 tp1_dist     = max(_tp1_atr_d, _tp1_h1_d)
-                min_tp_dist  = current_price * 0.0022  # 0.22% = round-trip fees (2×0.1%) + 0.02% margin
-                if tp1_dist < min_tp_dist:
+                # FIX-5: EMA cross re-applies fee gate with reduced threshold (0.15% vs 0.22%)
+                # without any gate, tight crossovers in ranging markets guaranteed fee losses.
+                _this_min_tp = current_price * (0.0015 if _strategy == "ema_cross" else 0.0022)
+                if tp1_dist < _this_min_tp:
                     push_log(f"[SKIP] {active_symbol} TP1 too close ({tp1_dist/current_price*100:.3f}%) — won't cover fees")
                     log("AGENT", "GATE_BLOCK_TP", symbol=active_symbol,
-                        tp1_pct=round(tp1_dist/current_price*100, 4), min_pct=0.22)
+                        tp1_pct=round(tp1_dist/current_price*100, 4),
+                        min_pct=round(_this_min_tp/current_price*100, 3))
                     signal = "NONE"
                 # Minimum R:R gate — reject entries where reward < 1.5× risk
                 MIN_ENTRY_RR = 1.5
@@ -1067,28 +1201,36 @@ async def main_loop():
                 if signal == "BUY" and atr_pct_live > MAX_ENTRY_ATR_PCT:
                     push_log(f"[SKIP] {active_symbol} ATR {atr_pct_live:.2f}% > {MAX_ENTRY_ATR_PCT}% cap — too volatile to enter safely")
                     signal = "NONE"
-                # NN confirmation gate.  Only enforce when training accuracy > 57%:
-                # at ≤57% the model is near-random on this coin's data and the gate
-                # would incorrectly block valid rule-engine entries.
-                _nn_gate_active = predictor.is_trained and predictor.train_acc > 0.57
+                # NH-2: gate activates only when OOS accuracy ≥ 58% AND test set ≥ 50 samples.
+                # NM-3: predictor is None for ema_cross — gate is always inactive, entry allowed.
+                from nn_predictor import OOS_MIN_ACC, OOS_MIN_SAMP
+                _nn_gate_active = (predictor is not None
+                                   and predictor.is_trained
+                                   and predictor.oos_acc >= OOS_MIN_ACC
+                                   and predictor.oos_samples >= OOS_MIN_SAMP)
                 if signal == "BUY" and _nn_gate_active and _nn_prob < predictor.conf_floor:
                     push_log(f"[NN] {active_symbol} up={_nn_prob:.1%} "
                              f"< {predictor.conf_floor:.0%} floor — entry blocked "
-                             f"(model acc={predictor.train_acc*100:.1f}%)")
+                             f"(OOS={predictor.oos_acc*100:.1f}% n={predictor.oos_samples})")
                     log("NN", "GATE_BLOCK", symbol=active_symbol,
                         prob=round(_nn_prob, 3), floor=predictor.conf_floor,
-                        train_acc=round(predictor.train_acc, 3))
+                        oos_acc=round(predictor.oos_acc, 3), oos_n=predictor.oos_samples)
                     signal = "NONE"
                 elif signal == "BUY":
-                    _gate_note = (f"acc={predictor.train_acc*100:.1f}% active"
-                                  if _nn_gate_active else "gate bypassed (model near-random)")
-                    push_log(f"[NN] {active_symbol} up={_nn_prob:.1%} — entry confirmed "
-                             f"({_gate_note})")
+                    if predictor is None:
+                        _gate_note = "ema_cross — no NN gate"
+                    elif _nn_gate_active:
+                        _gate_note = f"OOS={predictor.oos_acc*100:.1f}% n={predictor.oos_samples} — gate active"
+                    else:
+                        _gate_note = f"gate bypassed (OOS={predictor.oos_acc*100:.1f}% n={predictor.oos_samples} — insufficient)"
+                    push_log(f"[NN] {active_symbol} up={_nn_prob:.1%} — entry confirmed ({_gate_note})")
 
             if signal == "BUY" and not em.positions:
-                # Last-second pool check — another agent may have just entered this coin
+                # NH-1: pool collision check applies to ALL strategies including ema_cross.
+                # Removing the ema_cross exemption prevents double ETH exposure when a momentum
+                # slot is already in ETHUSDT (which ema_cross now uses as its assigned coin).
                 if active_symbol in _ep.get_other_symbols(_agent_slot):
-                    push_log(f"[SKIP] {active_symbol} just claimed by another slot — skipping to avoid duplicate")
+                    push_log(f"[SKIP] {active_symbol} already held by another slot — skipping to avoid duplicate exposure")
                     signal = "NONE"
 
             if signal == "BUY" and not em.positions:
@@ -1299,7 +1441,7 @@ async def main_loop():
             if em.positions:
                 _save_positions(_agent_slot, active_symbol, em.positions)
             log("AGENT", "SHUTDOWN", reason="KeyboardInterrupt")
-            await om.cancel_all()
+            await om.cancel_all(symbol=active_symbol)
             await md.close()
             await om.close()
             await scanner.close()
