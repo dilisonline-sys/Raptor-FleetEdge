@@ -6,34 +6,38 @@
 
 ## Overview
 
-Raptor FleetEdge is a multi-agent cryptocurrency trading system built for Binance Spot. A **fleet manager** spawns up to 4 independent trading agents, each watching a different coin. The system:
+Raptor FleetEdge is a multi-agent cryptocurrency trading system built for Binance Spot. A **fleet manager** spawns up to **5 independent trading agents**, each watching a different coin. The system:
 
 - Runs a live volatility-chase strategy on 15-minute candles
 - Classifies market regime (TRENDING / RANGING / VOLATILE) and only enters on TRENDING
 - Uses EMA 9/21/50 stack, RSI, MACD, ATR, Bollinger Bands, and VWAP
 - Sizes positions dynamically based on ATR and account equity
 - Manages exits with a 3-tier TP ladder aligned to the past 1-hour price range
-- Agent 1 (slot 0) is permanently locked to BTCUSDT; the other three rotate to the best-ranked coins
+- **Agent 1 (slot 0)** is permanently locked to BTCUSDT
+- **Agents 2–4 (slots 1–3)** use momentum strategy and rotate to the best-ranked coins
+- **Agent 5 (slot 4)** runs EMA Crossover strategy, permanently locked to ETHUSDT
 - Liquidates base asset back to USDT automatically before every coin rotation (slots 1–3)
 - Persists open positions across restarts — exact entry, stop, and TP values are restored
 - Each agent exposes a live dashboard with 1-second candle charts, rule analyst panel, and order log
 - Pre-screens every candidate coin for structural fee viability before assignment (coin health filter)
+- Neural network (pure NumPy MLP) augments entry decisions when trained OOS accuracy ≥ 58%
 
 ---
 
 ## Architecture
 
 ```
-                        ┌─────────────────────────────┐
-                        │   Agent Manager  :7430       │
-                        │   Fleet overview dashboard   │
-                        └───────────┬─────────────────┘
-               ┌───────────┬────────┴────────┬───────────┐
-               ▼           ▼                 ▼           ▼
-         Agent 0       Agent 1           Agent 2     Agent 3
-         :7434         :7435             :7436       :7437
-         BTCUSDT       top coin          top coin    top coin
-         (locked)      (auto-rotate)     (auto)      (auto)
+                        ┌──────────────────────────────┐
+                        │   Agent Manager  :7430        │
+                        │   Fleet overview dashboard    │
+                        └──────┬──────────┬────────────┘
+          ┌───────────┬─────────┴──┬──────┴──────┬───────────┐
+          ▼           ▼            ▼              ▼           ▼
+      Agent 0     Agent 1      Agent 2        Agent 3     Agent 4
+      :7434       :7435        :7436          :7437       :7438
+      BTCUSDT     top coin     top coin       top coin    ETHUSDT
+      (locked)    (auto-rot)   (auto-rot)     (auto-rot)  EMA Cross
+                  momentum     momentum       momentum    (locked)
 ```
 
 Each agent runs an independent `agent.py` process. The manager proxy forwards `/agent/<name>/*` requests to the correct agent port.
@@ -94,7 +98,7 @@ DIPU_AUTHORIZED_AGENT_TOKENS=
 ### 3. Build and start
 
 ```bash
-docker compose up -d --build
+sudo docker compose up -d --build
 ```
 
 This builds the image, starts the manager, and makes it available at **http://localhost:7430**.
@@ -113,17 +117,18 @@ http://localhost:7430
 | URL | Description |
 |---|---|
 | `http://localhost:7430` | Agent Manager — fleet overview, spawn/stop controls |
-| `http://localhost:7430/agent/fleetedge1/` | BTC agent live dashboard |
-| `http://localhost:7430/agent/fleetedge2/` | Agent 2 dashboard |
-| `http://localhost:7430/agent/fleetedge3/` | Agent 3 dashboard |
-| `http://localhost:7430/agent/fleetedge4/` | Agent 4 dashboard |
+| `http://localhost:7430/agent/fleetedge1/` | Slot 0 — BTC agent live dashboard |
+| `http://localhost:7430/agent/fleetedge2/` | Slot 1 — Momentum agent dashboard |
+| `http://localhost:7430/agent/fleetedge3/` | Slot 2 — Momentum agent dashboard |
+| `http://localhost:7430/agent/fleetedge4/` | Slot 3 — Momentum agent dashboard |
+| `http://localhost:7430/agent/fleetedge5/` | Slot 4 — EMA Cross agent (ETHUSDT) |
 
 Each agent dashboard includes:
 - **1-second live candle chart** — builds from the SSE price stream in real time
 - **EMA 9/21 overlay** — refreshed each trading cycle (~60s)
 - **USDT balance + coin asset value** — live from Binance
 - **Signal / regime / RSI / MACD** — current indicator readings
-- **Open positions** with entry, stop, TP1/TP2 lines on chart
+- **Open positions** with entry, stop, TP1/TP2/TP3 lines on chart
 - **Portfolio card** — full account value: USDT + active spot positions + Simple Earn holdings
 - **Rule Analyst panel** — indicator-driven advisory read, enable/disable per dashboard
 - **Order log** — recent fills and open orders
@@ -144,6 +149,7 @@ Each agent dashboard includes:
 | `BINANCE_LIVE_API_SECRET` | If live | |
 | `DIPU_ALERT_WEBHOOK` | No | Discord/Slack webhook for trade alerts |
 | `DIPU_AUTHORIZED_AGENT_TOKENS` | No | Tokens for external agent POST access |
+| `DIPU_FLEET_SIZE` | No | Number of agent slots (default: 5) |
 
 ---
 
@@ -188,7 +194,9 @@ docker run -d \
   -p 7430:7430 \
   -p 7434:7434 \
   -p 7435:7435 \
-  -p 7436:7437 \
+  -p 7436:7436 \
+  -p 7437:7437 \
+  -p 7438:7438 \
   -v rfe_logs:/tmp \
   raptor-fleetedge
 
@@ -203,7 +211,7 @@ docker stop raptor-fleetedge && docker rm raptor-fleetedge
 
 ## Spawning the Fleet via API
 
-Once the manager is running, spawn all 4 agents programmatically:
+Once the manager is running, spawn all 5 agents programmatically:
 
 ```bash
 curl -s -X POST http://localhost:7430/api/spawn-fleet \
@@ -218,10 +226,10 @@ curl -X POST http://localhost:7430/api/spawn \
   -H "Content-Type: application/json" \
   -d '{"name":"fleetedge1","mode":"live","port":7434,"symbol":"BTCUSDT","slot":0}'
 
-# Spawn an auto-rotating agent (slot 1)
+# Spawn EMA Cross agent (slot 4 — always ETHUSDT)
 curl -X POST http://localhost:7430/api/spawn \
   -H "Content-Type: application/json" \
-  -d '{"name":"fleetedge2","mode":"live","port":7435,"symbol":"ETHUSDT","slot":1}'
+  -d '{"name":"fleetedge5","mode":"live","port":7438,"symbol":"ETHUSDT","slot":4,"strategy":"ema_cross"}'
 ```
 
 Stop an agent:
@@ -279,7 +287,7 @@ Before a candidate is deep-scored, `coin_health.py` runs four structural checks 
 | `TICK_TRAP` | Min tick ≥ 50% of 15m ATR | Coin cannot produce enough per-candle movement to cover fees |
 | `FLAT_MOVER` | < 2 of last 4 candles had body > 0.075% | Rolling history shows coin has been statistically unable to beat fees |
 
-Results are cached 5 minutes per coin to avoid redundant API calls. Coins that fail any check are excluded from the ranked list and logged as `HEALTH_EXCLUDED`.
+Results are cached 5 minutes per coin to avoid redundant API calls. Coins that fail any check are excluded from the ranked list and logged as `HEALTH_EXCLUDED`. The health cache for a coin is **cleared before every rotation** so the new coin always gets a fresh check.
 
 ### Coin Rotation
 
@@ -287,18 +295,21 @@ Agents in slots 1–3 automatically rotate to the best-ranked coin when:
 
 | Trigger | Description |
 |---|---|
-| Scanner pick | Background scanner finds a higher-ranked coin with no open position |
 | Quality gate escape | 2 consecutive data quality fails on the current coin |
 | Ranging escape | Current coin classified RANGING — rotates to next ranked coin |
 | Volatile escape | Current coin VOLATILE for 10+ minutes — forces rotation |
-| Signal rotate | No tradeable setup for 5 consecutive cycles |
+| Signal rotate | No tradeable setup for 3 consecutive cycles |
 | SELL with no position | Bear signal on a coin we don't hold — rotates immediately |
 | Manual `SWITCH_COIN` | Operator-requested switch via instruction endpoint |
 | Manual `FORCE_BTC` | Forces switch to BTCUSDT |
 
-**Before every rotation** (slots 1–3 only), the agent automatically sells any remaining base asset back to USDT so the equity pool always has liquid capital for the next entry.
+**Before every rotation** (slots 1–3 only), the agent automatically sells any remaining base asset back to USDT so the equity pool always has liquid capital for the next entry. The health cache for the departing coin is also invalidated so it gets a fresh score on re-entry.
 
 **Slot 0 (BTC agent) never rotates and never sells** — it stays in BTCUSDT permanently.
+
+**Slot 4 (EMA Cross) never rotates** — it is permanently locked to ETHUSDT and runs the crossover strategy, not the momentum strategy.
+
+**ETHUSDT is excluded from the momentum slot 1–3 coin picker** — preventing double ETH exposure when the EMA cross agent is active.
 
 ---
 
@@ -309,12 +320,12 @@ Every BUY signal passes through a chain of gates before an order is placed. Any 
 | Gate | Condition | Log tag |
 |---|---|---|
 | Cooldown | 30-minute re-entry cooldown after last fill on same coin | `[COOLDOWN]` |
-| BTC flat-day | BTC 24h range < 1.5% — flat market, fees consume profit | `GATE_BLOCK_BTC_FLAT` |
+| BTC flat-session | BTC session range < 1.5% — flat market, fees consume profit | `GATE_BLOCK_BTC_FLAT` |
 | TP distance | TP1 distance < 0.22% of price (fees + margin) | `GATE_BLOCK_TP` |
 | R:R ratio | Reward < 1.5× risk at current ATR | `GATE_BLOCK_RR` |
 | Fear & Greed | F&G index < 10 (full panic — no new longs) | `GATE_BLOCK_FG` |
 | ATR cap | ATR > 3% of price — too volatile, stops blow on noise | (inline skip) |
-| NN confirmation | Neural network up-probability < confidence floor (when model accuracy > 57%) | `NN.GATE_BLOCK` |
+| NN confirmation | Neural network up-probability < confidence floor (when model OOS accuracy ≥ 58% and ≥ 50 test samples) | `NN.GATE_BLOCK` |
 | Duplicate coin | Another slot already holds the same coin | `[SKIP] duplicate` |
 | Pool budget | Order notional < $10 after equity pool allocation | `[SKIP] sizing aborted` |
 
@@ -332,9 +343,14 @@ Signals are computed from the **previous completed 15m candle** (not the live fo
 | `SELL` (momentum) | EMA stack bearish AND RSI > 30 AND MACD < signal AND price < EMA21 AND bullish candle |
 | `SELL` (pullback) | EMA stack bearish AND RSI > 65 AND price < EMA21 |
 
-The regime classifier (`regime.py`) gates which signals are valid:
-- **TRENDING**: all signals active
-- **RANGING / VOLATILE**: no new entries — wait for regime change or rotate
+### EMA Cross Strategy (Slot 4)
+
+Agent 5 uses a dedicated crossover strategy on closed candles only:
+- **Golden cross** (EMA9 crosses above EMA21) → BUY
+- **Death cross** (EMA9 crosses below EMA21) → SELL/close
+- New entries are blocked during VOLATILE regime (5%+ ATR/price flash-crash guard)
+
+The regime classifier uses `ind["close"]` (not VWAP) for the ATR-to-price ratio — making the VOLATILE threshold consistent with what the scanner and signal engine observe.
 
 ---
 
@@ -352,11 +368,11 @@ The halt reason is always displayed in the agent dashboard log panel so the caus
 
 ### Transient equity glitch protection
 
-`update_metrics` is skipped if the reported equity is less than 30% of the day-start equity — this prevents a Binance API pricing glitch (e.g. a coin price returned as 0) from triggering a false drawdown halt.
+`update_metrics` is skipped if the reported equity is less than 30% of the day-start equity — this prevents a Binance API pricing glitch (e.g. a coin price returned as 0) from triggering a false drawdown halt. It is also skipped on idle cycles when a fresh post-close equity figure was already fetched — preventing duplicate metric updates from distorting the drawdown calculation.
 
-### Halts are only evaluated after a position closes
+### P&L recording
 
-The risk engine is only called when a trade actually exits. It is never called on idle cycles, preventing compounding halt triggers during periods of no trading activity.
+`risk.record_trade()` is called for **every realized P&L event** — full closes (stop, time, signal reversal), and TP1 / TP2 / TP3 partial closes. This ensures the consecutive-loss counter and drawdown ledger are always accurate, even when positions are only partially closed.
 
 ### RESUME behaviour
 
@@ -372,7 +388,7 @@ Sending `RESUME` via instruction:
 Position size is calculated as:
 
 ```
-risk_amount = equity × RISK_PCT          # 10% of equity for live
+risk_amount = equity × RISK_PCT          # 1% of equity for live
 stop_dist   = ATR × ATR_STOP_MULT        # 1.0× ATR (tight stop)
 raw_qty     = risk_amount / stop_dist
 
@@ -387,8 +403,10 @@ If the per-slot equity share falls below the Binance $10 minimum order, the syst
 | Level | Distance from entry | Close fraction |
 |---|---|---|
 | TP1 | 1.5× ATR (or 40% of 1h range, whichever is larger) | 33% |
-| TP2 | 2.5× ATR | 33% |
-| TP3 | 4.0× ATR | 34% |
+| TP2 | 2.5× ATR (or 80% of 1h range, whichever is larger) | 33% |
+| TP3 | 4.0× ATR (or 125% of 1h range, whichever is larger) | 34% (full remaining) |
+
+All three levels are now fully wired: TP3 fires a market sell for the remaining position and records P&L.
 
 ---
 
@@ -401,7 +419,7 @@ Raptor FleetEdge can send email alerts for key events. Configure it from the man
 | Event | Toggle |
 |---|---|
 | Coin rotation | Any time an agent switches to a new coin (with reason) |
-| Order fills | BUY entries, SELL exits, TP1/TP2 partial closes |
+| Order fills | BUY entries, SELL exits, TP1/TP2/TP3 partial closes |
 | Coin traded | When the active coin changes |
 | 4h P&L report | Automatically every 4 hours — full fleet summary |
 
@@ -433,31 +451,12 @@ curl -X POST http://localhost:7430/api/email-config \
     "smtp_user": "sender@gmail.com",
     "smtp_password": "xxxx xxxx xxxx xxxx",
     "notifications": {
-      "coin_rotation": true,
       "order_fills":   true,
       "coin_traded":   true,
       "pnl_report":    true
     }
   }'
 ```
-
-Send a test email:
-
-```bash
-curl -X POST http://localhost:7430/api/email-test \
-  -H "Content-Type: application/json" \
-  -d '{"recipient": "you@example.com"}'
-```
-
-Trigger a P&L report immediately:
-
-```bash
-curl -X POST http://localhost:7430/api/email-pnl
-```
-
-### Using other SMTP providers
-
-The default is Gmail on port **465 (SSL)**. Port 587 (STARTTLS) is also supported — set `smtp_port` to `587` if your network requires it. For non-Gmail providers, set `smtp_host` and `smtp_port` in the config call above.
 
 ---
 
@@ -473,6 +472,7 @@ Each agent accepts POST instructions at `/instruction`. Valid actions:
 | `HALT` | Emergency halt — stop trading |
 | `RESUME` | Resume after halt (also resets consecutive-loss counter) |
 | `RESET_DAY_START` | Reset risk baselines to current equity — use after `RESUME` to prevent immediate re-halt |
+| `SWITCH_MODE` | Switch trading mode (`testnet`/`demo`/`live`) — reloads API keys and recreates HTTP session |
 | `SWITCH_COIN` | Switch to a specific symbol (e.g. `"symbol":"SOLUSDT"`) |
 | `RESUME_AUTO` | Return to scanner-driven coin selection |
 | `FORCE_BTC` | Switch to BTCUSDT immediately |
@@ -534,16 +534,16 @@ Before switching to `TRADING_MODE=live`:
 
 ## Key Configuration Parameters (`config.py`)
 
-| Parameter | Default (live) | Description |
+| Parameter | Live default | Description |
 |---|---|---|
-| `RISK_PCT` | `0.10` | Fraction of equity risked per trade |
-| `MAX_TRADE_PCT` | `0.70` | Max fraction of equity deployed in one position |
-| `MAX_EXPOSURE` | `0.70` | Max fraction of total equity deployed fleet-wide |
-| `FLEET_SIZE` | `4` | Number of agent slots sharing the pool |
+| `RISK_PCT` | `0.01` | Fraction of equity risked per trade (1%) |
+| `MAX_TRADE_PCT` | `0.15` | Max fraction of equity deployed in one position (15%) |
+| `MAX_EXPOSURE` | `0.40` | Max fraction of total equity deployed fleet-wide (40%) |
+| `FLEET_SIZE` | `5` | Number of agent slots sharing the pool |
 | `ATR_STOP_MULT` | `1.0` | Stop distance = 1× ATR from entry |
 | `TP1_R` | `1.5` | TP1 = 1.5× stop distance |
 | `TP2_R` | `2.5` | TP2 = 2.5× stop distance |
-| `TP3_R` | `4.0` | TP3 = 4.0× stop distance |
+| `TP3_R` | `4.0` | TP3 = 4.0× stop distance (remaining position exits here) |
 | `DAILY_DD_LIMIT` | `0.10` | Halt after 10% daily drawdown |
 | `MONTHLY_DD_LIMIT` | `0.15` | Halt after 15% monthly drawdown |
 | `MAX_CONSEC_LOSS` | `3` | Halt after 3 consecutive losing trades |
@@ -563,8 +563,8 @@ Before switching to `TRADING_MODE=live`:
 | `market_data.py` | Feeds, order book, indicators (RSI, EMA, MACD, ATR, BB, VWAP) |
 | `market_scanner.py` | Ranks coins by volatility/momentum score; integrates health filter |
 | `sizing.py` | Position sizing with volatility and sentiment adjustment |
-| `order_manager.py` | Order submission, retries, fill tracking, Simple Earn value fetcher |
-| `exit_manager.py` | Hard stops, break-even, trailing stops, TP1/2/3 ladder |
+| `order_manager.py` | Order submission, retries, fill tracking, stop-limit placement, session management |
+| `exit_manager.py` | Hard stops, break-even, trailing stops, TP1/TP2/TP3 ladder |
 | `risk_engine.py` | Drawdown tracking, kill switch, halt reason logging, alerts |
 | `regime.py` | TRENDING / RANGING / VOLATILE classification |
 | `equity_pool.py` | Shared pool — coordinates budgets, coin exclusions, earn value across agents |
@@ -573,6 +573,7 @@ Before switching to `TRADING_MODE=live`:
 | `rule_analyst.py` | Indicator-driven advisory analyst |
 | `rule_coin_selector.py` | Rule-based profitability coin selector |
 | `nn_predictor.py` | Pure-NumPy MLP — trains on live candle data to confirm entry direction |
+| `ema_cross_module.py` | EMA crossover signal engine for slot 4 |
 | `email_notifier.py` | Email alerts — fills, rotations, 4h P&L reports |
 | `instruction_server.py` | Per-agent HTTP dashboard and instruction endpoint |
 | `config.py` | All parameters in one place |
@@ -609,16 +610,74 @@ Before each check the monitor queries every agent's live state via HTTP. If an a
 
 If today's drawdown is still ≥ 5% the agent is left halted (active loss situation — the safeguard should hold).
 
-### Email report contents
+---
 
-- **Status** — `ALL OK`, `N agent(s) auto-resumed`, or `N issue(s) detected`
-- Agent state per slot (RUNNING / HALTED / LOOP_ERR)
-- Per-slot open positions and daily P&L
-- Full portfolio breakdown (USDT + Spot + Earn)
-- Auto-resolution actions taken (✅ RESUMED / ⚠ SKIPPED with reason)
-- Any remaining risk alerts or anomalies
+## Bug Fixes & Corrections Log
 
-Configure the monitor with the same email settings used for trade notifications.
+This section documents all defects identified and resolved across three independent expert audits.
+
+### Round 1 — Core Infrastructure Fixes
+
+| ID | File | Fix |
+|---|---|---|
+| FIX-1 | `order_manager.py` | `cancel_all()` silently cancelled the wrong pair — now accepts the active symbol as a parameter |
+| FIX-2 | `risk_engine.py` | `record_trade()` was never called for break-even exits (pnl=0) — consecutive-loss counter could not be accurate |
+| FIX-4 | `agent_manager.py` | EMA cross agent assigned BTCUSDT (same as slot 0) — changed to ETHUSDT to prevent double BTC exposure |
+| FIX-5 | `agent.py` | EMA cross fee gate threshold corrected from 0.22% to 0.15% (tighter crossovers need lower threshold) |
+| FIX-6 | `agent.py` | Partial fills cleared the full position; now checks `status` before clearing and re-tracks remaining qty |
+| FIX-7 | `ema_cross_module.py` | Used live-forming candle indicators — phantom crossovers from intra-candle tick noise; switched to closed-candle indicators |
+| FIX-8 | `market_data.py` | WS cache returned stale data after silent disconnect; added monotonic timestamp and 10s REST fallback |
+| FIX-9 | `agent.py` | NN training ran synchronously in the async loop, blocking the cycle for several seconds; moved to `run_in_executor` |
+| FIX-10 | `agent.py` | Orphan recovery assumed actual fill price was known; switched to synthetic position with widened stop and explicit warning |
+| FIX-11 | `regime.py` | Regime changed every candle (no persistence); added 2-candle hysteresis — regime only confirms after 2 consecutive identical reads |
+| FIX-12 | `agent.py` | Session-start equity reset on every container restart; now persisted to `/tmp/rfe_session_start_<slot>_<date>.json` |
+| FIX-13 | `agent.py` | Background scanner started for EMA cross agents — wasted API rate limit since they never rotate; scanner now skipped for `strategy=ema_cross` |
+| FIX-14 | `agent.py` | BTC flat-day guard used 24h rolling range (included previous session's move); switched to session-high/low from current session open |
+| FIX-15 | `exit_manager.py` | TP2 quantity overcalculated — applied TP2_PCT to full original qty instead of remaining post-TP1 qty; corrected fractional calculation |
+| FIX-16 | `market_data.py` | WS reconnect gave up after 4 failures; replaced with infinite reconnect with capped exponential backoff (max 60s) |
+| FIX-17 | `equity_pool.py` | Pool initialised with only live slots (skipped slot 4 budget entry); now defaults to `FLEET_SIZE` slots |
+
+### Round 2 — Audit Corrections
+
+| ID | File | Fix |
+|---|---|---|
+| NM-2 | `agent.py` | Stale `_ranked_idx` variable accumulated across rotations causing wrong coin selection; removed all assignments |
+| NM-3 | `agent.py` | NN retrain block ran for EMA cross agents where `predictor=None`; wrapped block with strategy guard |
+| NM-4 | `agent.py` | Background scanner logged `top5=[]` for EMA cross agents (scanner not started); added strategy guard to log block |
+| NH-2 | `agent.py` | NN gate activated when `predictor.oos_acc` was set but `oos_samples < 50` — gate could block entries on statistically invalid model; added sample count guard |
+| NH-3 | `agent.py` | Session equity files from previous calendar days accumulated in `/tmp`; added cleanup on startup |
+| NC-1 | `agent.py` | TP2 sell quantity in agent loop used wrong fraction (applied to full balance, not remaining); corrected to match exit_manager logic |
+| NC-3 | `agent.py` | `CLOSE_ALL` instruction didn't check fill status before clearing positions; partial fills left orphaned coins |
+| NC-4 | `agent.py` | EMA cross coin could be overridden by `AGENT_SYMBOL` env var to BTCUSDT; locked to ETHUSDT with env var as secondary fallback only |
+| NC-5 | `agent.py` | EMA cross could open new positions during VOLATILE regime; added VOLATILE block for new EMA cross entries |
+| STARTUP | `agent.py` | `queue = asyncio.Queue()` accidentally dropped during audit edits; agents started then immediately crashed with `NameError` |
+
+### Round 3 — Expert Audit (22 Findings)
+
+| ID | Severity | File | Fix |
+|---|---|---|---|
+| C-1 | Critical | `config.py` | Live risk params dangerously aggressive: `RISK_PCT=10%`, `MAX_TRADE_PCT=70%` — corrected to `1%` / `15%` / `40%` exposure |
+| C-2 | Critical | `agent.py` | Orphan BTC sell called `om.get_lot_step()` as a tick dict — `get_lot_step()` returns a `float`; `submit()` immediately crashed with `TypeError: 'float' object is not subscriptable` |
+| C-3 | Critical | `equity_pool.py` | Pool file opened with `"w"` mode (truncating it immediately) before `fcntl.flock()` could protect it — concurrent readers saw an empty file; replaced with atomic write-then-`os.replace()` |
+| C-4 | Critical | `market_data.py` | Both WS loops hard-coded live Binance endpoints (`wss://stream.binance.com:9443/ws/...`); testnet and demo agents always streamed live prices; fixed to use `cfg.SPOT_WS_URL` |
+| C-5 | Critical | `agent.py` / `order_manager.py` | `SWITCH_MODE` updated URL config but kept the old API session with old credentials; added API key reload from env and `om.reset_session()` call; added `reset_session()` method to `OrderManager` |
+| H-1 | High | `agent.py` | `get_balances_raw()` called twice per BUY cycle (lines ~1155 and ~1239) — two REST calls to Binance per entry; second call removed, values reused |
+| H-2 | High | `exit_manager.py` / `agent.py` | TP3 target was computed and stored but never triggered; added `tp3_hit` field to `Position`, TP3 detection in exit manager, and `PARTIAL_CLOSE:BUY:TP3` handler in agent loop |
+| H-3 | High | `agent_manager.py` | Fleet spawner minimum price filter was `$0.05` — allowed coins where a single tick costs 0.125% of price (worse than fee threshold); raised to `$0.50` |
+| H-4 | High | `agent_manager.py` | ETHUSDT (EMA cross coin) could appear in top3_others picker for momentum slots 1–3, causing double ETH exposure; ETHUSDT explicitly excluded from momentum slot assignment |
+| H-5 | High | `agent.py` | `RESET_DAY_START` fetched balances for `cfg.SYMBOL` (static BTCUSDT) instead of `active_symbol`; slots trading other coins reset baselines against the wrong symbol's price |
+| H-6 | High | `agent_manager.py` | `/api/pool` fallback response returned `range(4)` slots — slot 4 (EMA cross) invisible in fleet UI when pool file was missing; corrected to `range(5)` |
+| M-1 | Medium | `market_data.py` | Book imbalance in WS book cache was never updated from live stream — stored unchanged `prev_imb` every tick; real imbalance now back-filled from REST orderbook every main cycle |
+| M-2 | Medium | `agent.py` | `from nn_predictor import OOS_MIN_ACC, OOS_MIN_SAMP` inside main loop (re-imported every cycle); moved to top-level module imports |
+| M-3 | Medium | `regime.py` | Regime ATR-to-price ratio used VWAP as price fallback — VWAP drifts from close price intraday, making the VOLATILE threshold inconsistent with scanner/signal engine; changed to `ind["close"]` |
+| M-4 | Medium | `config.py` | `FLEET_SIZE` default was `4` — slot 4 had no equity pool entry at startup; changed default to `5` (also configurable via `DIPU_FLEET_SIZE` env var) |
+| M-5 | Medium | `agent.py` | `risk.record_trade()` not called for TP1/TP2 partial closes — consecutive-loss counter and drawdown ledger were blind to partial P&L; now called after every TP fill |
+| M-6 | Medium | `agent.py` | `scanner._health.invalidate()` never called before coin rotation — health filter could serve stale (cached) rejection for a coin the agent just rotated away from; invalidate now called before every `md.close()` at rotation sites |
+| M-7 | Medium | `agent.py` | After a full position close, `risk.update_metrics()` ran twice in the same cycle (once with fresh post-close equity, once with cached equity from `_state`); second call now skipped if post-close equity was already fetched |
+| L-1 | Low | `agent.py` | Signal reversal exit only implemented for BUY side (RSI > 78 + MACD cross-down); SELL positions have no equivalent signal-reversal exit; documented as known limitation |
+| L-2 | Low | `agent.py` | Same as M-5 — TP partial close P&L not fed to `risk.record_trade()`; resolved together with M-5 |
+| L-3 | Low | `agent.py` | Background scanner loop slept only 60s but `SCAN_INTERVAL=300s` — scanner fired 5× per interval, burning API rate limit on redundant scans; sleep changed to `270s` |
+| NH-3 | Low | `agent.py` | Old session equity files from previous calendar days accumulated in `/tmp`; cleanup now runs on startup, removing files whose date does not match today |
 
 ---
 
