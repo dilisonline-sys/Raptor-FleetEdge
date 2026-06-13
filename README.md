@@ -1,4 +1,4 @@
-# dipu — Crypto Trading Agent Fleet
+# Raptor FleetEdge
 
 > 20-year veteran persona. Sizes aggressively on pristine setups, sits flat when the market is ambiguous. Capital preservation is the floor, not the goal.
 
@@ -6,7 +6,7 @@
 
 ## Overview
 
-dipu is a multi-agent cryptocurrency trading system built for Binance Spot. A **fleet manager** spawns up to 4 independent trading agents, each watching a different coin. The system:
+Raptor FleetEdge is a multi-agent cryptocurrency trading system built for Binance Spot. A **fleet manager** spawns up to 4 independent trading agents, each watching a different coin. The system:
 
 - Runs a live volatility-chase strategy on 15-minute candles
 - Classifies market regime (TRENDING / RANGING / VOLATILE) and only enters on TRENDING
@@ -56,7 +56,7 @@ Each agent runs an independent `agent.py` process. The manager proxy forwards `/
 
 ```bash
 git clone https://github.com/dilisonline-sys/dipu-agent.git
-cd dipu-agent
+cd dipu-agent   # repository folder name unchanged
 ```
 
 ### 2. Create your `.env` file
@@ -113,10 +113,10 @@ http://localhost:7430
 | URL | Description |
 |---|---|
 | `http://localhost:7430` | Agent Manager — fleet overview, spawn/stop controls |
-| `http://localhost:7430/agent/dipu-live/` | BTC agent live dashboard |
-| `http://localhost:7430/agent/dipu-live-1/` | Agent 2 dashboard |
-| `http://localhost:7430/agent/dipu-live-2/` | Agent 3 dashboard |
-| `http://localhost:7430/agent/dipu-live-3/` | Agent 4 dashboard |
+| `http://localhost:7430/agent/fleetedge1/` | BTC agent live dashboard |
+| `http://localhost:7430/agent/fleetedge2/` | Agent 2 dashboard |
+| `http://localhost:7430/agent/fleetedge3/` | Agent 3 dashboard |
+| `http://localhost:7430/agent/fleetedge4/` | Agent 4 dashboard |
 
 Each agent dashboard includes:
 - **1-second live candle chart** — builds from the SSE price stream in real time
@@ -178,25 +178,25 @@ If you prefer not to use Compose:
 
 ```bash
 # Build the image
-docker build -t dipu-agent .
+docker build -t raptor-fleetedge .
 
 # Run the manager (starts on port 7430)
 docker run -d \
-  --name dipu \
+  --name raptor-fleetedge \
   --restart unless-stopped \
   --env-file .env \
   -p 7430:7430 \
   -p 7434:7434 \
   -p 7435:7435 \
   -p 7436:7437 \
-  -v dipu_logs:/tmp \
-  dipu-agent
+  -v rfe_logs:/tmp \
+  raptor-fleetedge
 
 # View logs
-docker logs -f dipu
+docker logs -f raptor-fleetedge
 
 # Stop
-docker stop dipu && docker rm dipu
+docker stop raptor-fleetedge && docker rm raptor-fleetedge
 ```
 
 ---
@@ -216,12 +216,12 @@ Or spawn a single agent manually:
 # Spawn BTC agent (slot 0 — always BTCUSDT)
 curl -X POST http://localhost:7430/api/spawn \
   -H "Content-Type: application/json" \
-  -d '{"name":"dipu-live","mode":"live","port":7434,"symbol":"BTCUSDT","slot":0}'
+  -d '{"name":"fleetedge1","mode":"live","port":7434,"symbol":"BTCUSDT","slot":0}'
 
 # Spawn an auto-rotating agent (slot 1)
 curl -X POST http://localhost:7430/api/spawn \
   -H "Content-Type: application/json" \
-  -d '{"name":"dipu-live-1","mode":"live","port":7435,"symbol":"ETHUSDT","slot":1}'
+  -d '{"name":"fleetedge2","mode":"live","port":7435,"symbol":"ETHUSDT","slot":1}'
 ```
 
 Stop an agent:
@@ -229,7 +229,7 @@ Stop an agent:
 ```bash
 curl -X POST http://localhost:7430/api/stop \
   -H "Content-Type: application/json" \
-  -d '{"name":"dipu-live-1"}'
+  -d '{"name":"fleetedge2"}'
 ```
 
 List all agents and their status:
@@ -251,7 +251,7 @@ curl -s http://localhost:7430/api/agents | python3 -m json.tool
 Switch mode for a running agent from the dashboard (Mode button) or via API:
 
 ```bash
-curl -X POST http://localhost:7430/agent/dipu-live/instruction \
+curl -X POST http://localhost:7430/agent/fleetedge1/instruction \
   -H "Content-Type: application/json" \
   -H "X-Agent-Token: internal" \
   -d '{"action":"SWITCH_MODE","mode":"live","source":"manual"}'
@@ -394,7 +394,7 @@ If the per-slot equity share falls below the Binance $10 minimum order, the syst
 
 ## Email Notifications
 
-dipu can send email alerts for key events. Configure it from the manager dashboard at `http://localhost:7430` (scroll to the **Email Notifications** panel) or via the API.
+Raptor FleetEdge can send email alerts for key events. Configure it from the manager dashboard at `http://localhost:7430` (scroll to the **Email Notifications** panel) or via the API.
 
 ### What gets notified
 
@@ -409,7 +409,7 @@ dipu can send email alerts for key events. Configure it from the manager dashboa
 
 1. Enable **2-Step Verification** on your Google account
 2. Go to **myaccount.google.com/apppasswords**
-3. Create an App Password — name it `dipu`
+3. Create an App Password — name it `raptor-fleetedge`
 4. Copy the 16-character password (format: `xxxx xxxx xxxx xxxx`)
 
 ### Configure via dashboard
@@ -482,7 +482,7 @@ Each agent accepts POST instructions at `/instruction`. Valid actions:
 Example — halt BTC agent:
 
 ```bash
-curl -X POST http://localhost:7430/agent/dipu-live/instruction \
+curl -X POST http://localhost:7430/agent/fleetedge1/instruction \
   -H "Content-Type: application/json" \
   -H "X-Agent-Token: internal" \
   -d '{"action":"HALT","source":"manual"}'
@@ -492,14 +492,14 @@ curl -X POST http://localhost:7430/agent/dipu-live/instruction \
 
 ## Logs
 
-Agent logs are written to `/tmp/dipu_<name>.log` inside the container (JSON Lines format).
+Agent logs are written to `/tmp/rfe_<name>.log` inside the container (JSON Lines format).
 
 ```bash
 # Stream BTC agent log
-docker exec dipu tail -f /tmp/dipu_dipu-live.log | python3 -m json.tool
+docker exec raptor-fleetedge tail -f /tmp/rfe_fleetedge1.log | python3 -m json.tool
 
 # Or with the named volume mounted, on the host:
-docker run --rm -v dipu_logs:/tmp alpine tail -f /tmp/dipu_dipu-live.log
+docker run --rm -v rfe_logs:/tmp alpine tail -f /tmp/rfe_fleetedge1.log
 ```
 
 ---
@@ -591,7 +591,7 @@ total_assets = usdt_free + spot_positions + simple_earn_holdings
 - **Spot positions** — sum of each slot's `open_usdt` (active coin valued at live price)
 - **Simple Earn** — all `LD`-prefixed Flexible Savings positions priced at market; fetched every 5 min by slot 0 and published to the shared pool
 
-This value is shown in the **PORTFOLIO card** on every agent dashboard and included in all monitor emails. Day P&L is calculated against the day-start baseline (`/tmp/dipu_portfolio_day.json`), which resets each UTC calendar day.
+This value is shown in the **PORTFOLIO card** on every agent dashboard and included in all monitor emails. Day P&L is calculated against the day-start baseline (`/tmp/rfe_portfolio_day.json`), which resets each UTC calendar day.
 
 ---
 
@@ -605,7 +605,7 @@ Before each check the monitor queries every agent's live state via HTTP. If an a
 
 1. Sends `RESUME` to clear the halt flag and reset consecutive-loss counter
 2. Waits 2 seconds, then sends `RESET_DAY_START` to reset the risk engine baselines to current equity — this prevents the agent from immediately re-halting on its next metrics update
-3. Resets `/tmp/dipu_portfolio_day.json` so future restarts also use the correct baseline
+3. Resets `/tmp/rfe_portfolio_day.json` so future restarts also use the correct baseline
 
 If today's drawdown is still ≥ 5% the agent is left halted (active loss situation — the safeguard should hold).
 

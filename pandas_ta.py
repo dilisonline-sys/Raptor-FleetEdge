@@ -1,4 +1,4 @@
-"""Minimal pandas_ta shim — implements only the functions used by dipu.
+"""Minimal pandas_ta shim — implements only the functions used by Raptor FleetEdge.
 
 Provides the same call signatures and return shapes as pandas_ta so no
 other file needs to change. Uses pure pandas/numpy — no external deps.

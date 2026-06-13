@@ -1,20 +1,20 @@
 services:
-  dipu:
+  raptor-fleetedge:
     build: .
-    container_name: dipu
+    container_name: raptor-fleetedge
     restart: unless-stopped
     env_file: .env
     environment:
       # Agent manager + all spawned sub-agents write logs here.
       # Override any individual var by adding it to .env
-      AGENT_NAME: dipu
+      AGENT_NAME: raptor
     ports:
       - "7430:7430"   # agent manager dashboard
       - "7432:7432"   # testnet agent
       - "7433:7433"   # demo agent
       - "7434:7434"   # live agent
     volumes:
-      - dipu_logs:/tmp
+      - rfe_logs:/tmp
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7430/api/agents')"]
       interval: 30s
@@ -23,4 +23,4 @@ services:
       start_period: 15s
 
 volumes:
-  dipu_logs:
+  rfe_logs:

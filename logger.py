@@ -5,8 +5,8 @@ import sys
 from datetime import datetime, timezone
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
-_log = logging.getLogger("dipu")
-_agent_name = os.environ.get("AGENT_NAME", "dipu")
+_log = logging.getLogger("raptor")
+_agent_name = os.environ.get("AGENT_NAME", "raptor")
 
 
 class _SafeEncoder(json.JSONEncoder):

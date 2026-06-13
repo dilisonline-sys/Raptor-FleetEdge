@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Identity ──────────────────────────────────────────────
-AGENT_NAME    = os.environ.get("AGENT_NAME", "dipu")
+AGENT_NAME    = os.environ.get("AGENT_NAME", "raptor")
 AGENT_VERSION = "1.1"
 
 # ── Trading mode ─────────────────────────────────────────

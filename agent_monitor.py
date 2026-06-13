@@ -1,5 +1,5 @@
 """
-Agent Monitor — checks all running dipu agents every 30 minutes for issues
+Agent Monitor — checks all running Raptor FleetEdge agents every 30 minutes for issues
 and auto-resolves halts when it is safe to do so.
 
 Auto-resolution (runs before the health check each cycle):
@@ -8,7 +8,7 @@ Auto-resolution (runs before the health check each cycle):
       1. Sends RESUME instruction to clear halt_flag / halt_until
       2. Waits 2 s, then sends RESET_DAY_START to reset risk baselines to
          current equity (prevents immediate re-halt on next metrics update)
-      3. Resets /tmp/dipu_portfolio_day.json baseline to current total assets
+      3. Resets /tmp/rfe_portfolio_day.json baseline to current total assets
   - Skips auto-resume when today's DD is still ≥ threshold (active loss)
 
 Checks performed:
@@ -18,7 +18,7 @@ Checks performed:
   - High daily drawdown (> 8% — warning before 10% halt)
   - Stale log (agent not logging — possible freeze)
 
-Writes a report to /tmp/dipu_monitor.log and always emails a report —
+Writes a report to /tmp/rfe_monitor.log and always emails a report —
 clean 'all OK' heartbeat every 30 min, or flagged report with resolutions.
 """
 
@@ -30,10 +30,10 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
-POOL_FILE     = Path("/tmp/dipu_equity_pool.json")
+POOL_FILE     = Path("/tmp/rfe_equity_pool.json")
 LOG_DIR       = Path("/tmp")
-MONITOR_LOG   = Path("/tmp/dipu_monitor.log")
-SLOT_NAMES    = {0: "dipu-live", 1: "dipu-live-1", 2: "dipu-live-2", 3: "dipu-live-3"}
+MONITOR_LOG   = Path("/tmp/rfe_monitor.log")
+SLOT_NAMES    = {0: "fleetedge1", 1: "fleetedge2", 2: "fleetedge3", 3: "fleetedge4"}
 AGENT_PORTS   = {0: 7434, 1: 7435, 2: 7436, 3: 7437}
 WINDOW_SECS   = 30 * 60           # look back 30 min for log issues
 STALE_SECS    = 120               # agent log silent for 2 min = stale
@@ -88,7 +88,7 @@ def _send_instruction(port: int, action: str, **kwargs) -> bool:
 
 
 def _reset_portfolio_day_start() -> float:
-    """Reset /tmp/dipu_portfolio_day.json to today's total assets. Returns new baseline."""
+    """Reset /tmp/rfe_portfolio_day.json to today's total assets. Returns new baseline."""
     try:
         import portfolio_tracker as _pt
         state = _pt.get_portfolio_state()
@@ -96,7 +96,7 @@ def _reset_portfolio_day_start() -> float:
         if total <= 0:
             return 0.0
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        day_file = Path("/tmp/dipu_portfolio_day.json")
+        day_file = Path("/tmp/rfe_portfolio_day.json")
         existing: dict = {}
         if day_file.exists():
             try:
@@ -197,7 +197,7 @@ def _scan_agent_log(name: str, since: float) -> dict:
     Scan the agent's log file for issues within the last WINDOW_SECS.
     Returns a dict of findings.
     """
-    log_path = LOG_DIR / f"dipu_{name}.log"
+    log_path = LOG_DIR / f"rfe_{name}.log"
     findings = {
         "loop_errors":   0,
         "halted":        False,
@@ -573,15 +573,15 @@ def send_monitor_email(result: dict) -> bool:
           {issue_html}
           {resolution_html}
           <p style="color:#444;font-size:11px;margin:16px 0 0">
-            Log: /tmp/dipu_monitor.log &nbsp;|&nbsp; Check interval: 30 min
+            Log: /tmp/rfe_monitor.log &nbsp;|&nbsp; Check interval: 30 min
           </p>""")
 
         if result.get("auto_resumed"):
-            subject = f"[dipu] ✅ {result['auto_resumed']} agent(s) auto-resumed — {result['ts']}"
+            subject = f"[Raptor FleetEdge] ✅ {result['auto_resumed']} agent(s) auto-resumed — {result['ts']}"
         elif result["healthy"]:
-            subject = f"[dipu] Health OK — {result['ts']}"
+            subject = f"[Raptor FleetEdge] Health OK — {result['ts']}"
         else:
-            subject = f"[dipu] ⚠ {len(result['issues'])} issue(s) detected — {result['ts']}"
+            subject = f"[Raptor FleetEdge] ⚠ {len(result['issues'])} issue(s) detected — {result['ts']}"
         ok, reason = _em._send(subject, html)
         if not ok:
             print(f"[monitor] email failed: {reason}")

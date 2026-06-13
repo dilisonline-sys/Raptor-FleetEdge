@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 import config as cfg
 
-POOL_FILE = Path("/tmp/dipu_equity_pool.json")
+POOL_FILE = Path("/tmp/rfe_equity_pool.json")
 SLOT_TTL  = 90  # seconds without heartbeat → slot treated as dead
 
 
