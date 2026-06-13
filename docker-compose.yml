@@ -15,6 +15,7 @@ services:
       - "7434:7434"   # live agent
     volumes:
       - rfe_logs:/tmp
+      - ./.env:/app/.env
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7430/api/agents')"]
       interval: 30s
