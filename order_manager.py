@@ -318,6 +318,57 @@ class OrderManager:
         ) as r:
             log("MODULE_7", "CANCEL_ALL_ORDERS", symbol=sym, status=r.status)
 
+    async def cancel_order(self, symbol: str, order_id: int) -> bool:
+        """Cancel a specific order by orderId. Returns True if successfully cancelled."""
+        await self._ensure_session()
+        params = {"symbol": symbol, "orderId": order_id,
+                  "timestamp": int(time.time() * 1000), "recvWindow": 5000}
+        params["signature"] = _sign(params)
+        try:
+            async with self._session.delete(
+                cfg.SPOT_BASE_URL + "/api/v3/order", params=params
+            ) as r:
+                ok = r.status == 200
+                log("MODULE_7", "CANCEL_ORDER", symbol=symbol, orderId=order_id, ok=ok)
+                return ok
+        except Exception as e:
+            log("MODULE_7", "CANCEL_ORDER_ERROR", symbol=symbol, orderId=order_id, error=str(e))
+            return False
+
+    async def place_stop_limit(self, symbol: str, qty: float, stop_price: float) -> int:
+        """Place a STOP_LOSS_LIMIT SELL order. Limit is 0.5% below stop to ensure fill.
+        Returns the exchange orderId (0 on failure)."""
+        step = await self.get_lot_step(symbol)
+        qty  = _round_step(qty, step)
+        if qty <= 0:
+            return 0
+        limit_price = round(stop_price * 0.995, 8)
+        params = {
+            "symbol":          symbol,
+            "side":            "SELL",
+            "type":            "STOP_LOSS_LIMIT",
+            "quantity":        qty,
+            "stopPrice":       stop_price,
+            "price":           limit_price,
+            "timeInForce":     "GTC",
+            "newOrderRespType":"RESULT",
+        }
+        result = await self._post_order(params)
+        if result:
+            oid = int(result.get("orderId", 0))
+            log("MODULE_3", "STOP_LIMIT_PLACED", symbol=symbol,
+                qty=qty, stop=stop_price, limit=limit_price, orderId=oid)
+            return oid
+        return 0
+
+    async def reset_session(self):
+        """Close and recreate the aiohttp session with fresh API credentials from cfg.
+        Called after a SWITCH_MODE so new API keys are picked up."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+        self._session = aiohttp.ClientSession(headers={"X-MBX-APIKEY": cfg.BINANCE_API_KEY})
+        log("MODULE_3", "SESSION_RESET", mode=cfg.TRADING_MODE)
+
     async def close(self):
         if self._session:
             await self._session.close()

@@ -41,7 +41,9 @@ class Position:
     lowest_price:     float = float("inf")
     tp1_hit:          bool  = False
     tp2_hit:          bool  = False
+    tp3_hit:          bool  = False
     breakeven_set:    bool  = False
+    exchange_stop_id: int   = 0     # C-6: orderId of the exchange-side stop order (0 = none placed)
 
 
 class ExitManager:
@@ -161,6 +163,16 @@ class ExitManager:
                     pos.tp2_hit = True
                     log("MODULE_5", "TP2_HIT", price=current_price, remaining_qty=round(pos.qty, 5))
                     actions.append((f"PARTIAL_CLOSE:{pos.side}:TP2", round(tp2_pnl, 4)))
+
+            # TP3 — H-2: sell the remaining position (~34% of original) at TP3
+            elif not pos.tp3_hit:
+                hit = (pos.side == "BUY" and current_price >= pos.tp3) or \
+                      (pos.side == "SELL" and current_price <= pos.tp3)
+                if hit:
+                    tp3_pnl     = (current_price - pos.avg_entry) * pos.qty * direction
+                    pos.tp3_hit = True
+                    log("MODULE_5", "TP3_HIT", price=current_price, qty=round(pos.qty, 5))
+                    actions.append((f"PARTIAL_CLOSE:{pos.side}:TP3", round(tp3_pnl, 4)))
 
             # Time exit
             hours_held = (time.time() - pos.entry_ts) / 3600

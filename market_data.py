@@ -35,8 +35,9 @@ class MarketData:
 
     async def _ws_ticker_loop(self):
         # FIX-16: infinite reconnect with capped exponential backoff (no give-up after 4 fails)
+        # C-4: use cfg.SPOT_WS_URL so testnet/demo agents don't stream live prices
         sym  = self.symbol.lower()
-        url  = f"wss://stream.binance.com:9443/ws/{sym}@ticker"
+        url  = f"{cfg.SPOT_WS_URL}/{sym}@ticker"
         fail = 0
         while True:
             try:
@@ -69,8 +70,9 @@ class MarketData:
 
     async def _ws_book_loop(self):
         # FIX-16: infinite reconnect with capped exponential backoff
+        # C-4: use cfg.SPOT_WS_URL so testnet/demo agents use correct WS endpoint
         sym  = self.symbol.lower()
-        url  = f"wss://stream.binance.com:9443/ws/{sym}@bookTicker"
+        url  = f"{cfg.SPOT_WS_URL}/{sym}@bookTicker"
         fail = 0
         while True:
             try:
