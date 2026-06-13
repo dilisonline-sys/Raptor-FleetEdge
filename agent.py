@@ -219,6 +219,7 @@ async def main_loop():
     selector  = RuleCoinSelector()
     # NM-3: predictor is never used by ema_cross — skip heavy numpy weight init for that strategy
     predictor = PricePredictor() if _strategy != "ema_cross" else None
+    queue      = asyncio.Queue()
     _wake      = asyncio.Event()
     server     = InstructionServer(queue)
     set_wake_event(_wake)
