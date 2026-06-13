@@ -10,6 +10,7 @@ class RiskEngine:
     def __init__(self):
         self.halt_flag         = False
         self.halt_until        = 0.0
+        self.halt_reason       = ""     # human-readable reason for the current halt
         self.day_start_equity  = None
         self.month_start_equity= None
         self.consec_losses     = 0
@@ -25,8 +26,9 @@ class RiskEngine:
         return False
 
     def _set_halt(self, hours: float, reason: str, equity: float):
-        self.halt_flag  = True
-        self.halt_until = time.time() + hours * 3600
+        self.halt_flag   = True
+        self.halt_until  = time.time() + hours * 3600
+        self.halt_reason = reason
         log("MODULE_7", "HALT_SET", reason=reason, hours=hours, equity=round(equity, 2))
 
     def record_trade(self, pnl: float, equity: float):
@@ -45,18 +47,35 @@ class RiskEngine:
         if self.month_start_equity is None:
             self.month_start_equity = current_equity
 
+        # Sanity guard: reject implausibly low equity values (< 30% of day_start)
+        # that indicate a transient API pricing failure (e.g. BTC price returned as 0).
+        # Such glitches should not trigger protective halts.
+        if (self.day_start_equity and self.day_start_equity > 0
+                and current_equity < self.day_start_equity * 0.30):
+            log("MODULE_6", "EQUITY_SANITY_SKIP",
+                current=round(current_equity, 2),
+                day_start=round(self.day_start_equity, 2),
+                ratio=round(current_equity / self.day_start_equity, 3),
+                msg="equity too low vs day_start — likely API pricing glitch, skipping DD check")
+            return
+
         daily_dd   = ((self.day_start_equity - current_equity) / self.day_start_equity
                       if self.day_start_equity else 0.0)
         monthly_dd = ((self.month_start_equity - current_equity) / self.month_start_equity
                       if self.month_start_equity else 0.0)
 
         if daily_dd >= cfg.DAILY_DD_LIMIT:
-            self._set_halt(4, f"daily drawdown {daily_dd:.1%}", current_equity)
+            reason = (f"daily drawdown {daily_dd:.1%} "
+                      f"(start ${self.day_start_equity:.2f} → now ${current_equity:.2f})")
+            self._set_halt(4, reason, current_equity)
         if monthly_dd >= cfg.MONTHLY_DD_LIMIT:
-            self._set_halt(24 * 30, f"monthly drawdown {monthly_dd:.1%}", current_equity)
+            reason = (f"monthly drawdown {monthly_dd:.1%} "
+                      f"(start ${self.month_start_equity:.2f} → now ${current_equity:.2f})")
+            self._set_halt(24 * 30, reason, current_equity)
 
         log("MODULE_6", "METRICS_UPDATE",
             equity=round(current_equity, 2),
+            day_start=round(self.day_start_equity, 2) if self.day_start_equity else None,
             daily_dd=round(daily_dd * 100, 2),
             monthly_dd=round(monthly_dd * 100, 2),
             consec_losses=self.consec_losses)

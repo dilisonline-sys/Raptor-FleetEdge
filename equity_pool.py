@@ -136,4 +136,11 @@ def get_budget(slot: int, total_equity: float) -> float:
     pool_cap      = total_equity * cfg.MAX_EXPOSURE - other_open
     per_agent_cap = total_equity * cfg.MAX_TRADE_PCT / n
 
+    # When the per-slot share is below the Binance minimum order ($10), fall
+    # back to the full pool headroom so a lone active agent can still trade.
+    # pool_cap already accounts for other slots' open exposure, so this is safe.
+    MIN_TRADEABLE = 10.0
+    if per_agent_cap < MIN_TRADEABLE:
+        return max(0.0, min(pool_cap, total_equity * cfg.MAX_TRADE_PCT))
+
     return max(0.0, min(pool_cap, per_agent_cap))
