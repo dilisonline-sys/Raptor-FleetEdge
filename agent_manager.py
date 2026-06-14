@@ -1141,15 +1141,23 @@ class AgentManager:
             top4 = [r["symbol"] for r in results[:4]]
         except Exception as e:
             print(f"[manager] fleet coin fetch failed: {e} — using fallback")
-            top4 = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]
+            top4 = ["BTCUSDT","SOLUSDT","BNBUSDT","XRPUSDT"]
 
-        # H-4: ema_sym (ETHUSDT) is reserved for slot 4 — exclude from momentum slots 1-3
+        # H-4: ema_sym (ETHUSDT) is reserved for slot 4 — exclude from momentum slots 1-3.
+        # Pull from a wider result pool so the fallback never has to re-introduce ETHUSDT.
         ema_sym     = "ETHUSDT"
-        # Slot 0 is permanently BTC; fill the other 3 from top momentum picks (excluding BTC + ETHUSDT)
-        top3_others = [s for s in top4 if s != "BTCUSDT" and s != ema_sym][:3]
-        while len(top3_others) < 3:
-            top3_others.append("ETHUSDT")
-        top4 = ["BTCUSDT"] + top3_others
+        _safe_fallbacks = ["SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","AVAXUSDT"]
+        # Filter the raw scan results first (wider pool than top4)
+        _cands = [r["symbol"] for r in results
+                  if r["symbol"] != "BTCUSDT" and r["symbol"] != ema_sym]
+        top3_others = _cands[:3]
+        # If scan gave too few results, fill from safe static fallbacks (never ETHUSDT)
+        for _fb in _safe_fallbacks:
+            if len(top3_others) >= 3:
+                break
+            if _fb not in top3_others:
+                top3_others.append(_fb)
+        top4 = ["BTCUSDT"] + top3_others[:3]
 
         spawned = []
         for slot, sym in enumerate(top4):
