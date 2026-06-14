@@ -1053,7 +1053,7 @@ def update_open_pos(pos_info: dict | None):
     _state["open_pos"] = pos_info
 
 
-URGENT_ACTIONS = {"FORCE_BTC", "HALT", "CLOSE_ALL", "SWITCH_COIN", "RESUME_AUTO", "SELL"}  # wake the main loop immediately
+URGENT_ACTIONS = {"FORCE_BTC", "HALT", "CLOSE_ALL", "SWITCH_COIN", "RESUME_AUTO", "SELL", "SET_STRATEGY"}  # wake the main loop immediately
 
 # Module-level wake event — agent imports and awaits this during its sleep
 wake_event: asyncio.Event | None = None
