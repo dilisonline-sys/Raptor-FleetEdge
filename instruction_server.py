@@ -976,7 +976,7 @@ def push_log(entry: str):
 
 
 def push_transaction(tx: dict):
-    tx["ts"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    tx["ts"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     # When a close comes in, update the matching open entry so it no longer
     # appears as an active position (prevents stale "OPEN" rows after stop/TP)
     side = tx.get("side", "")
@@ -1088,7 +1088,7 @@ class InstructionServer:
                             "id": o["orderId"], "side": o["side"],
                             "qty": o["origQty"], "filled": o["executedQty"],
                             "price": o["price"], "status": o["status"],
-                            "ts": _dt.datetime.fromtimestamp(o["time"]//1000, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                            "ts": _dt.datetime.fromtimestamp(o["time"]//1000).strftime("%Y-%m-%d %H:%M"),
                         })
                 # Recent order history (last 20)
                 p2 = {"symbol": sym, "timestamp": int(_t.time()*1000), "recvWindow": 5000, "limit": 20}
@@ -1106,7 +1106,7 @@ class InstructionServer:
                             "qty": o["executedQty"],
                             "price": f"{avg_price:.2f}",
                             "status": o["status"],
-                            "ts": _dt.datetime.fromtimestamp(o["time"]//1000, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                            "ts": _dt.datetime.fromtimestamp(o["time"]//1000).strftime("%Y-%m-%d %H:%M"),
                         })
         except Exception as e:
             result["error"] = str(e)
