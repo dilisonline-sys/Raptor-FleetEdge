@@ -5,7 +5,7 @@ Agents write their raw_usdt to the pool; this module aggregates for P&L.
 import fcntl
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 POOL_FILE      = Path("/tmp/rfe_equity_pool.json")
@@ -66,7 +66,7 @@ def get_portfolio_state() -> dict:
 
 def reset_day_start(total_assets: float) -> None:
     """Call at start of new day or agent fleet restart."""
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = datetime.now().strftime("%Y-%m-%d")
     _save_day_start(total_assets, date_str)
 
 
@@ -86,7 +86,7 @@ def _load_day_start() -> float | None:
                 data = json.load(f)
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
         if data.get("date") != today:
             return None
         return float(data["assets"])
@@ -96,7 +96,7 @@ def _load_day_start() -> float | None:
 
 def _save_day_start(val: float, date_str: str | None = None) -> None:
     if date_str is None:
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date_str = datetime.now().strftime("%Y-%m-%d")
     payload = {"assets": val, "ts": time.time(), "date": date_str}
     try:
         with open(DAY_START_FILE, "w") as f:

@@ -27,7 +27,7 @@ class _SafeEncoder(json.JSONEncoder):
 
 def log(module: str, action: str, **kwargs) -> None:
     record = {
-        "ts":     datetime.now(timezone.utc).isoformat(),
+        "ts":     datetime.now().astimezone().isoformat(),
         "agent":  _agent_name,
         "module": module,
         "action": action,

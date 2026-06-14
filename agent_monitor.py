@@ -44,7 +44,7 @@ AUTO_RESUME_DD_THRESHOLD = 5.0    # auto-resume halted agent only if today's DD 
 
 
 def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _parse_ts(ts_str: str) -> float:
@@ -95,7 +95,7 @@ def _reset_portfolio_day_start() -> float:
         total = state.get("total_assets", 0.0)
         if total <= 0:
             return 0.0
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
         day_file = Path("/tmp/rfe_portfolio_day.json")
         existing: dict = {}
         if day_file.exists():

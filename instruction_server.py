@@ -617,7 +617,7 @@ function renderCards(s) {
       .filter(([k,v]) => v && parseInt(k) !== mySlot)
       .reduce((acc,[,v]) => acc + (v.open_usdt||0), 0);
     setEl('pb-budget', '$' + ((s.equity || 0) * 0.7 - othersOpen).toFixed(0) + ' avail');
-    setEl('pb-ts', new Date(ps.ts*1000).toISOString().slice(11,19)+' UTC');
+    setEl('pb-ts', new Date(ps.ts*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}));
   }
 }
 
@@ -649,7 +649,7 @@ function renderTx(txs) {
   });
   wrap.innerHTML = `<table>
     <thead><tr>
-      <th>Time (UTC)</th><th>Side</th><th>Symbol</th>
+      <th>Time</th><th>Side</th><th>Symbol</th>
       <th style="text-align:right">Qty</th>
       <th style="text-align:right">Fill</th>
       <th style="text-align:right">Stop</th>
@@ -784,7 +784,7 @@ function renderScanner(s) {
   const rows = (s.scanner_ranked || []).slice(0, 4);
   const best = s.scanner_best || '';
   const active = s.symbol || '';
-  const ts = s.scanner_ts ? new Date(s.scanner_ts*1000).toISOString().slice(11,19)+' UTC' : '—';
+  const ts = s.scanner_ts ? new Date(s.scanner_ts*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}) : '—';
   document.getElementById('scanner-ts').textContent = 'last scan: ' + ts;
   const tbody = document.getElementById('scanner-tbody');
   if (!rows.length) {
@@ -903,7 +903,7 @@ function renderAnalyst(s) {
   el('ai-resistance').textContent = a.resistance ? a.resistance.toLocaleString('en',{maximumSignificantDigits:6}) : '—';
   el('ai-insight').textContent = a.insight || '—';
   el('ai-watch').textContent = a.watch || '—';
-  el('ai-ts').textContent = a.ts ? 'updated ' + new Date(a.ts*1000).toISOString().slice(11,19) + ' UTC' : '';
+  el('ai-ts').textContent = a.ts ? 'updated ' + new Date(a.ts*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}) : '';
 }
 
 // ── Theme toggle ──────────────────────────────────────────
