@@ -46,7 +46,7 @@ def save_config(cfg: dict) -> None:
 
 
 def _ts() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
 def _send(subject: str, body_html: str) -> tuple[bool, str]:
