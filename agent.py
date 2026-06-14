@@ -30,10 +30,25 @@ from logger import log
 import config as cfg
 import email_notifier as _email
 import equity_pool as _ep
-import ema_cross_module as _ema_cross
+import ema_cross_module    as _ema_cross
+import rsi_reversal_module as _rsi_rev
+import macd_cross_module   as _macd_cross
+import bb_breakout_module  as _bb_break
 from rule_analyst import RuleAnalyst
 from rule_coin_selector import RuleCoinSelector
 from nn_predictor import PricePredictor, OOS_MIN_ACC, OOS_MIN_SAMP
+
+# ── Strategy registry ─────────────────────────────────────────────────────
+STRATEGY_LABELS: dict[str, str] = {
+    "ema_cross":    "EMA Cross · Crossover",
+    "momentum":     "Volatility Chase · Momentum",
+    "rsi_reversal": "RSI · Mean Reversion",
+    "macd_cross":   "MACD · Crossover",
+    "bb_breakout":  "Bollinger · Band Bounce",
+}
+VALID_STRATEGIES = set(STRATEGY_LABELS.keys())
+# Strategies that skip RANGING regime (trend-following only)
+RANGING_SKIP_STRATEGIES = {"momentum", "macd_cross"}
 
 
 # ── Position persistence ──────────────────────────────────────────────────
@@ -217,8 +232,8 @@ async def main_loop():
     _strategy   = os.environ.get("AGENT_STRATEGY", "momentum").lower()
     analyst   = RuleAnalyst()
     selector  = RuleCoinSelector()
-    # NM-3: predictor is never used by ema_cross — skip heavy numpy weight init for that strategy
-    predictor = PricePredictor() if _strategy != "ema_cross" else None
+    # NM-3: predictor is only used by momentum — skip heavy numpy weight init for all other strategies
+    predictor = PricePredictor() if _strategy == "momentum" else None
     queue      = asyncio.Queue()
     _wake      = asyncio.Event()
     server     = InstructionServer(queue)
@@ -476,13 +491,12 @@ async def main_loop():
     _session_low:        float = float("inf")
     _ai_sel_triggered      = False          # one-shot: fired when session P&L ≤ 0, resets on recovery
     _ai_sel_pending_ts     = 0.0           # stagger: slot N waits N×20s before firing
-    _strategy_label = ("EMA Cross · Crossover" if _strategy == "ema_cross"
-                       else "Volatility Chase · Momentum Only")
+    _strategy_label = STRATEGY_LABELS.get(_strategy, _strategy)
     update_state(equity=equity, symbol=active_symbol,
                  session_start_equity=round(_session_start_equity, 2),
                  session_start_ts=_session_start_ts,
                  session_pnl=0.0, session_pnl_pct=0.0,
-                 strategy=_strategy_label)
+                 strategy=_strategy_label, strategy_key=_strategy)
 
     # ── Staggered startup: let earlier slots register in pool before this one
     # scans for a coin, preventing all agents from picking the same top coin simultaneously.
@@ -673,6 +687,18 @@ async def main_loop():
                     analyst.toggle(False)
                     update_state(analyst_enabled=False, analysis={})
                     push_log("[ANALYST] Advisory analyst disabled")
+                elif action == "SET_STRATEGY":
+                    _req_strat = instr.get("strategy", "").lower().strip()
+                    if _req_strat in VALID_STRATEGIES:
+                        _old_strat  = _strategy
+                        _strategy   = _req_strat
+                        _strategy_label = STRATEGY_LABELS[_strategy]
+                        _prev_indicators = None  # reset crossover detection state
+                        update_state(strategy=_strategy_label, strategy_key=_strategy)
+                        push_log(f"[SET_STRATEGY] {_old_strat} → {_strategy} | {_strategy_label}")
+                        log("AGENT", "STRATEGY_SWITCHED", from_=_old_strat, to=_strategy)
+                    else:
+                        push_log(f"[SET_STRATEGY] Unknown strategy '{_req_strat}' — ignored")
             except asyncio.QueueEmpty:
                 pass
 
@@ -712,9 +738,11 @@ async def main_loop():
             _session_high = max(_session_high, current_price)
             _session_low  = min(_session_low,  current_price)
 
-            # FIX-7: EMA cross uses closed-candle indicators (strip WS-patched live candle)
+            # FIX-7: Crossover strategies use closed-candle indicators (strip WS-patched live candle)
             # to avoid phantom crossovers from intra-candle price noise.
-            _closed_indicators = md.compute_indicators(candles.iloc[:-1]) if _strategy == "ema_cross" else indicators
+            _closed_indicators = (md.compute_indicators(candles.iloc[:-1])
+                                  if _strategy in ("ema_cross", "macd_cross")
+                                  else indicators)
 
             # EMA cross: persist closed-candle indicators for next cycle's crossover comparison
             _prev_indicators = dict(_closed_indicators)
@@ -748,8 +776,8 @@ async def main_loop():
             gate_fail_streak = 0
 
             # ── NN model: retrain when symbol changes or interval elapses ────
-            # NM-3: predictor is None for ema_cross agents — skip block entirely
-            if _strategy != "ema_cross" and predictor is not None:
+            # NM-3: predictor is None for all non-momentum strategies — skip block entirely
+            if predictor is not None:
                 _nn_cycle_count += 1
                 if (not predictor.is_trained
                         or predictor.symbol != active_symbol
@@ -850,16 +878,17 @@ async def main_loop():
                                  candles, regime, fear_greed, _pos_info)
                 )
 
-            # NC-5: EMA cross blocks new entries during VOLATILE (flash crash / liquidity crisis).
-            # Crossovers during 5%+ ATR moves are noise not trend. Open positions still managed.
-            if regime == "VOLATILE" and not em.positions and _strategy == "ema_cross":
-                push_log(f"[EMA_CROSS] VOLATILE regime — no new entries (flash-crash guard)")
+            # NC-5: Crossover/mean-reversion strategies block new entries during VOLATILE
+            # (flash crash / liquidity crisis). Open positions are still managed.
+            if regime == "VOLATILE" and not em.positions and _strategy not in RANGING_SKIP_STRATEGIES:
+                push_log(f"[{_strategy.upper()}] VOLATILE regime — no new entries (flash-crash guard)")
                 await _cycle_sleep()
                 continue
 
             # ── RANGING / VOLATILE with no position: rotate if stuck ────────
-            # Momentum strategy skips RANGING/VOLATILE to avoid noise.
-            if regime in ("RANGING", "VOLATILE") and not em.positions and _strategy != "ema_cross":
+            # Trend-following strategies (momentum, macd_cross) skip RANGING/VOLATILE.
+            # Mean-reversion strategies (rsi_reversal, bb_breakout, ema_cross) may trade ranging.
+            if regime in ("RANGING", "VOLATILE") and not em.positions and _strategy in RANGING_SKIP_STRATEGIES:
                 none_signal_streak += 1
                 push_log(f"[{regime}] {active_symbol} — no-entry | streak={none_signal_streak}")
                 if (none_signal_streak >= NONE_SIGNAL_ROTATE
@@ -976,18 +1005,26 @@ async def main_loop():
             else:
                 update_open_pos(None)
 
-            # ── Signal ────────────────────────────────────────────
+            # ── Signal dispatch ───────────────────────────────────
             if _strategy == "ema_cross":
-                # FIX-7: pass _closed_indicators (prev completed candle) to avoid WS phantom signals
+                # FIX-7: closed indicators avoid WS phantom crossovers mid-candle
                 signal = _ema_cross.signal_engine(_closed_indicators, _ema_prev,
                                                    override=pending_override)
-            else:
+            elif _strategy == "rsi_reversal":
+                signal = _rsi_rev.signal_engine(indicators, override=pending_override)
+            elif _strategy == "macd_cross":
+                signal = _macd_cross.signal_engine(_closed_indicators, _ema_prev,
+                                                    override=pending_override)
+            elif _strategy == "bb_breakout":
+                signal = _bb_break.signal_engine(indicators, override=pending_override)
+            else:  # "momentum" (default)
                 signal = signal_engine(indicators, regime, override=pending_override)
             pending_override = None
 
             # ── Neural network signal augmentation ───────────────────────────
-            # Skipped for EMA cross — the crossover itself is the sole signal gate.
-            if _strategy == "ema_cross":
+            # Skipped for crossover/mean-reversion strategies — signal is self-contained.
+            _uses_nn = _strategy == "momentum"
+            if not _uses_nn:
                 _nn_prob = 0.5  # neutral placeholder for dashboard display
                 update_state(nn_confidence=50.0)
             else:
@@ -1018,10 +1055,10 @@ async def main_loop():
                     signal = "SELL"
 
             update_state(last_signal=signal)
-            # EMA cross: death cross with no position = just wait for next golden cross.
-            # Convert to NONE so rotation logic (below) is not triggered.
-            if _strategy == "ema_cross" and signal == "SELL" and not em.positions:
-                push_log(f"[EMA_CROSS] Death cross — no position open, waiting for golden cross")
+            # Crossover strategies: bearish cross with no position = wait for bullish cross.
+            # Convert SELL → NONE so rotation logic is not triggered.
+            if signal == "SELL" and not em.positions and _strategy in ("ema_cross", "macd_cross"):
+                push_log(f"[{_strategy.upper()}] Bearish cross — no position, waiting for bullish cross")
                 signal = "NONE"
 
             # SELL with no open position is spot-untradeable — treat like NONE for rotation.
@@ -1202,9 +1239,9 @@ async def main_loop():
                 _tp1_atr_d   = stop_d * cfg.TP1_R
                 _tp1_h1_d    = _h1r * 0.40 if _h1r > 0 else 0
                 tp1_dist     = max(_tp1_atr_d, _tp1_h1_d)
-                # FIX-5: EMA cross re-applies fee gate with reduced threshold (0.15% vs 0.22%)
+                # FIX-5: Precision strategies (crossover/mean-reversion) use reduced TP threshold (0.15% vs 0.22%)
                 # without any gate, tight crossovers in ranging markets guaranteed fee losses.
-                _this_min_tp = current_price * (0.0015 if _strategy == "ema_cross" else 0.0022)
+                _this_min_tp = current_price * (0.0015 if _strategy != "momentum" else 0.0022)
                 if tp1_dist < _this_min_tp:
                     push_log(f"[SKIP] {active_symbol} TP1 too close ({tp1_dist/current_price*100:.3f}%) — won't cover fees")
                     log("AGENT", "GATE_BLOCK_TP", symbol=active_symbol,
