@@ -9,7 +9,7 @@ from aiohttp import web
 from logger import log
 import config as cfg
 
-VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO", "ANALYST_ON", "ANALYST_OFF"}
+VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO", "ANALYST_ON", "ANALYST_OFF", "SET_STRATEGY"}
 
 _state = {
     "started_at":    time.time(),
@@ -35,6 +35,7 @@ _state = {
     "max_trade_pct": cfg.MAX_TRADE_PCT,
     "cycle_sleep":   cfg.CYCLE_SLEEP_SECONDS,
     "strategy":      "Volatility Chase · Momentum Only",
+    "strategy_key":  "momentum",
     "scanner_ranked": [],
     "scanner_best":   "—",
     "scanner_ts":     0,
@@ -114,6 +115,10 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .cbtn.active{background:#00e5ff;border-color:#00e5ff;color:#000;font-weight:bold}
 .cbtn.auto{background:#161616;border-color:#333;color:#00e5ff}
 .cbtn.auto.active{background:#00e5ff;color:#000}
+/* strategy selector */
+.sbtn{background:#111;border:1px solid #222;color:#aaa;padding:4px 11px;border-radius:4px;cursor:pointer;font-size:.70rem;font-family:inherit;transition:all .15s}
+.sbtn:hover{border-color:#ffd600;color:#ffd600}
+.sbtn.active{background:#ffd600;border-color:#ffd600;color:#000;font-weight:bold}
 /* ── Theme toggle button ── */
 #theme-btn{position:fixed;top:12px;right:16px;z-index:9999;background:#1e1e2e;border:1px solid #444;color:#e0e0ff;border-radius:20px;padding:5px 14px;cursor:pointer;font-family:'Courier New',monospace;font-size:.72rem;font-weight:bold;letter-spacing:.04em;box-shadow:0 2px 8px rgba(0,0,0,.5);transition:.2s}
 #theme-btn:hover{background:#2a2a3e;border-color:#00e5ff;color:#00e5ff}
@@ -214,6 +219,12 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
   <span style="color:#fff;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em">Coin</span>
   <div id="coin-selector" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+</div>
+
+<!-- Strategy selector -->
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+  <span style="color:#aaa;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em">Strategy</span>
+  <div id="strategy-selector" style="display:flex;gap:6px;flex-wrap:wrap"></div>
 </div>
 
 <h2>&#9646; Chart — <span id="chart-sym-title">loading…</span></h2>
@@ -519,6 +530,35 @@ async function selectCoin(sym) {
   }).catch(()=>{});
 }
 
+// ── Strategy selector ──────────────────────────────────────
+let _strategyKey = 'momentum';
+const _STRATEGIES = [
+  {key:'momentum',     label:'Volatility Chase · Momentum'},
+  {key:'ema_cross',    label:'EMA Cross · Crossover'},
+  {key:'rsi_reversal', label:'RSI · Mean Reversion'},
+  {key:'macd_cross',   label:'MACD · Crossover'},
+  {key:'bb_breakout',  label:'Bollinger · Band Bounce'},
+];
+
+function renderStrategySelector(strategyKey) {
+  const el = document.getElementById('strategy-selector');
+  if (!el) return;
+  el.innerHTML = _STRATEGIES.map(s => {
+    const active = (strategyKey === s.key) ? 'active' : '';
+    return `<button class="sbtn ${active}" onclick="setStrategy('${s.key}')">${s.label}</button>`;
+  }).join('');
+}
+
+async function setStrategy(key) {
+  _strategyKey = key;
+  renderStrategySelector(key);
+  await fetch('/instruction', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
+    body: JSON.stringify({action:'SET_STRATEGY', strategy: key, source:'dashboard'}),
+  }).catch(()=>{});
+}
+
 function renderCards(s) {
   const upSec = Math.floor(Date.now()/1000 - startedAt);
   const h = Math.floor(upSec/3600), m = Math.floor((upSec%3600)/60);
@@ -580,6 +620,11 @@ function renderCards(s) {
   if (incoming !== _topCoins.join(',')) {
     _topCoins = s.top_coins || [];
     renderCoinSelector(_topCoins, _coinMode);   // preserve user's current selection
+  }
+  // Sync strategy selector when agent reports a strategy change
+  if (s.strategy_key && s.strategy_key !== _strategyKey) {
+    _strategyKey = s.strategy_key;
+    renderStrategySelector(_strategyKey);
   }
   // Portfolio card
   if (s.portfolio && s.portfolio.total_assets) {
@@ -936,6 +981,7 @@ function toggleTheme() {
 // ── Boot ──────────────────────────────────────────────────
 initChart();
 renderCoinSelector([], 'auto');
+renderStrategySelector(_strategyKey);
 refresh();
 connectSSE();
 loadOrders();
@@ -1154,10 +1200,11 @@ class InstructionServer:
         if action not in VALID_ACTIONS:
             return web.json_response({"error": f"unknown action: {action}"}, status=400)
         instruction = {
-            "action":  action,
-            "symbol":  body.get("symbol", cfg.SYMBOL),
-            "qty_pct": float(body.get("qty_pct", 1.0)),
-            "source":  body.get("source", "unknown"),
+            "action":   action,
+            "symbol":   body.get("symbol", cfg.SYMBOL),
+            "qty_pct":  float(body.get("qty_pct", 1.0)),
+            "source":   body.get("source", "unknown"),
+            "strategy": body.get("strategy", ""),
         }
         log("INSTRUCTION_SERVER", "INSTRUCTION_RECEIVED",
             instr_action=instruction["action"], source=instruction["source"],
