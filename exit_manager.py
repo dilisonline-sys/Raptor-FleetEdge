@@ -145,7 +145,13 @@ class ExitManager:
                     tp1_pnl     = (current_price - pos.avg_entry) * sold_qty * direction
                     pos.qty    *= (1 - cfg.TP1_PCT)
                     pos.tp1_hit = True
-                    log("MODULE_5", "TP1_HIT", price=current_price, remaining_qty=round(pos.qty, 5))
+                    # Staircase stop: lock stop at TP1 so remaining position never gives back TP1 level
+                    if pos.side == "BUY" and pos.tp1 > pos.stop:
+                        pos.stop = pos.tp1
+                    elif pos.side == "SELL" and pos.tp1 < pos.stop:
+                        pos.stop = pos.tp1
+                    log("MODULE_5", "TP1_HIT", price=current_price, remaining_qty=round(pos.qty, 5),
+                        stop_locked_to=round(pos.stop, 2))
                     actions.append((f"PARTIAL_CLOSE:{pos.side}:TP1", round(tp1_pnl, 4)))
 
             # TP2 — record P&L on the sold slice before reducing qty
@@ -161,7 +167,13 @@ class ExitManager:
                     tp2_pnl     = (current_price - pos.avg_entry) * sold_qty * direction
                     pos.qty    *= (1 - frac)
                     pos.tp2_hit = True
-                    log("MODULE_5", "TP2_HIT", price=current_price, remaining_qty=round(pos.qty, 5))
+                    # Staircase stop: lock stop at TP2 so the TP3 runner can't give back TP2 level
+                    if pos.side == "BUY" and pos.tp2 > pos.stop:
+                        pos.stop = pos.tp2
+                    elif pos.side == "SELL" and pos.tp2 < pos.stop:
+                        pos.stop = pos.tp2
+                    log("MODULE_5", "TP2_HIT", price=current_price, remaining_qty=round(pos.qty, 5),
+                        stop_locked_to=round(pos.stop, 2))
                     actions.append((f"PARTIAL_CLOSE:{pos.side}:TP2", round(tp2_pnl, 4)))
 
             # TP3 — H-2: sell the remaining position (~34% of original) at TP3
