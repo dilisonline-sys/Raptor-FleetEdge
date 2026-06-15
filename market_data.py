@@ -179,6 +179,7 @@ class MarketData:
         return df
 
     def compute_indicators(self, df: pd.DataFrame) -> dict:
+        import math as _math
         c = df["close"]
         ind = {}
         ind["ema9"]        = ta.ema(c, 9).iloc[-1]
@@ -188,23 +189,60 @@ class MarketData:
         macd_df            = ta.macd(c, 12, 26, 9)
         ind["macd"]        = macd_df["MACD_12_26_9"].iloc[-1]
         ind["macd_signal"] = macd_df["MACDs_12_26_9"].iloc[-1]
+        ind["macd_hist"]   = ind["macd"] - ind["macd_signal"]
         bb                 = ta.bbands(c, 20, 2)
         ind["bb_upper"]    = bb["BBU_20_2_2.0"].iloc[-1]
         ind["bb_lower"]    = bb["BBL_20_2_2.0"].iloc[-1]
+        bb_mid             = bb["BBM_20_2_2.0"].iloc[-1]
+        bb_range           = ind["bb_upper"] - ind["bb_lower"]
+        ind["bb_width"]    = (bb_range / bb_mid * 100) if bb_mid else 0.0   # % of midline
+        ind["bb_pct"]      = ((c.iloc[-1] - ind["bb_lower"]) / bb_range) if bb_range else 0.5
         atr                = ta.atr(df["high"], df["low"], df["close"], cfg.ATR_PERIOD)
         ind["atr14"]       = atr.iloc[-1]
         tp                 = (df["high"] + df["low"] + df["close"]) / 3
         vp                 = (tp * df["volume"]).cumsum()
         ind["vwap"]        = (vp / df["volume"].cumsum()).iloc[-1]
-        ind["close"]       = float(c.iloc[-1])   # current close — use this for EMA/BB comparisons
-        ind["open"]        = float(df["open"].iloc[-1])   # last candle open — for candle body filter
-        # Previous COMPLETED candle — used by signal engine for body direction.
-        # The current (live) candle's body changes every tick and produces noisy signals;
-        # the previous completed candle gives a stable, committed momentum read.
+        ind["close"]       = float(c.iloc[-1])
+        ind["open"]        = float(df["open"].iloc[-1])
         ind["prev_close"]  = float(c.iloc[-2])
         ind["prev_open"]   = float(df["open"].iloc[-2])
-        # 1h range: max-high minus min-low of the last 4 × 15m candles (= 1 hour of actual price action)
         ind["h1_range"]    = float(df["high"].iloc[-4:].max() - df["low"].iloc[-4:].min())
+
+        # ADX14 — trend strength: >25 = trending, <20 = ranging
+        try:
+            adx_df         = ta.adx(df["high"], df["low"], df["close"], 14)
+            ind["adx14"]   = float(adx_df["ADX_14"].iloc[-1])
+        except Exception:
+            ind["adx14"]   = 20.0  # neutral fallback
+
+        # Stochastic RSI (14,3,3) — %K: more sensitive reversal signal than RSI alone
+        try:
+            srsi           = ta.stochrsi(c, 14, 3, 3)
+            ind["stoch_rsi_k"] = float(srsi["STOCHRSIk_14_14_3_3"].iloc[-1])
+        except Exception:
+            ind["stoch_rsi_k"] = float(ind["rsi14"])  # degrade to RSI if unavailable
+
+        # Choppiness Index (14) — >61.8 = choppy/ranging, <38.2 = trending
+        # Formula: 100 × log10(sum_atr14 / (period_high - period_low)) / log10(14)
+        try:
+            period         = 14
+            _atr1          = ta.atr(df["high"], df["low"], df["close"], 1).fillna(0)
+            sum_atr        = _atr1.iloc[-period:].sum()
+            ph             = df["high"].iloc[-period:].max()
+            pl             = df["low"].iloc[-period:].min()
+            chop_raw       = (100 * _math.log10(sum_atr / (ph - pl)) / _math.log10(period)
+                              if ph > pl and sum_atr > 0 else 50.0)
+            ind["choppiness14"] = min(max(chop_raw, 0.0), 100.0)
+        except Exception:
+            ind["choppiness14"] = 50.0  # neutral fallback
+
+        # Volume ratio — current bar volume vs 20-bar SMA (>1.5 = surge, <0.7 = dry)
+        try:
+            vol_sma        = df["volume"].iloc[-21:-1].mean()   # exclude current live candle
+            ind["volume_ratio"] = float(df["volume"].iloc[-1] / vol_sma) if vol_sma else 1.0
+        except Exception:
+            ind["volume_ratio"] = 1.0
+
         return ind
 
     def quality_gate(self, tick: dict, book: dict) -> bool:

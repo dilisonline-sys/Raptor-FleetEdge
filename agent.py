@@ -30,10 +30,11 @@ from logger import log
 import config as cfg
 import email_notifier as _email
 import equity_pool as _ep
-import ema_cross_module    as _ema_cross
-import rsi_reversal_module as _rsi_rev
-import macd_cross_module   as _macd_cross
-import bb_breakout_module  as _bb_break
+import ema_cross_module       as _ema_cross
+import rsi_reversal_module    as _rsi_rev
+import macd_cross_module      as _macd_cross
+import bb_breakout_module     as _bb_break
+import strategy_advisor_module as _advisor
 from rule_analyst import RuleAnalyst
 from rule_coin_selector import RuleCoinSelector
 from nn_predictor import PricePredictor, OOS_MIN_ACC, OOS_MIN_SAMP
@@ -863,7 +864,12 @@ async def main_loop():
             update_state(regime=regime, equity=equity, positions=len(em.positions),
                          symbol=active_symbol, price=current_price)
             push_log(f"[CYCLE] {active_symbol} | price={current_price:.4f} | regime={regime} "
-                     f"| RSI={indicators['rsi14']:.1f} | EMA9={indicators['ema9']:.4f}")
+                     f"| RSI={indicators['rsi14']:.1f} | EMA9={indicators['ema9']:.4f} "
+                     f"| ADX={indicators.get('adx14',0):.1f} | Chop={indicators.get('choppiness14',50):.1f}")
+
+            # ── Strategy Advisor ──────────────────────────────────
+            _advice = _advisor.advice_payload(indicators, regime)
+            update_state(**_advice)
 
             # ── Rule Analyst (advisory) ─────────────────────────────────────────
             if analyst.enabled:
