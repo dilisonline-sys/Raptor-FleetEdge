@@ -48,6 +48,11 @@ _state = {
     "analyst_enabled": False,
     "analysis":        {},
     "portfolio":        {},
+    "advised_strategy":        "—",
+    "advised_strategy_label":  "—",
+    "advised_strategy_score":  0.0,
+    "advised_strategy_reason": "—",
+    "strategy_scores":         [],
 }
 
 # ── HTML template ──────────────────────────────────────────────────────────────
@@ -221,10 +226,16 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
   <div id="coin-selector" style="display:flex;gap:6px;flex-wrap:wrap"></div>
 </div>
 
-<!-- Strategy selector -->
-<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+<!-- Strategy selector + advisor -->
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
   <span style="color:#aaa;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em">Strategy</span>
   <div id="strategy-selector" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+</div>
+<div id="strategy-advice-bar" style="display:none;margin-bottom:12px;padding:6px 12px;background:#0d1a0d;border:1px solid #1a3a1a;border-radius:5px;font-size:.70rem;color:#aaa;line-height:1.5">
+  <span style="color:#00e676;font-weight:bold">&#9670; Advisor: </span>
+  <span id="advice-label" style="color:#ffd600;font-weight:bold">—</span>
+  <span style="color:#aaa"> · score </span><span id="advice-score" style="color:#fff">—</span>
+  <span style="color:#555"> · </span><span id="advice-reason" style="color:#aaa">—</span>
 </div>
 
 <h2>&#9646; Chart — <span id="chart-sym-title">loading…</span></h2>
@@ -625,6 +636,24 @@ function renderCards(s) {
   if (s.strategy_key && s.strategy_key !== _strategyKey) {
     _strategyKey = s.strategy_key;
     renderStrategySelector(_strategyKey);
+  }
+  // Strategy advisor bar
+  if (s.advised_strategy && s.advised_strategy !== '—') {
+    const bar = document.getElementById('strategy-advice-bar');
+    if (bar) {
+      bar.style.display = 'block';
+      setEl('advice-label', s.advised_strategy_label || s.advised_strategy);
+      setEl('advice-score', (s.advised_strategy_score || 0).toFixed(1) + '/10');
+      setEl('advice-reason', s.advised_strategy_reason || '');
+      // Highlight the advised button if it differs from the active strategy
+      document.querySelectorAll('.sbtn').forEach(btn => {
+        btn.style.outline = '';
+      });
+      if (s.advised_strategy !== _strategyKey) {
+        const advBtn = document.querySelector(`.sbtn[onclick="setStrategy('${s.advised_strategy}')"]`);
+        if (advBtn) advBtn.style.outline = '1px dashed #00e676';
+      }
+    }
   }
   // Portfolio card
   if (s.portfolio && s.portfolio.total_assets) {
