@@ -124,7 +124,7 @@ MAX_SLIPPAGE    = 0.0010   # 0.1% — spec aligned
 
 # ── Indicators ────────────────────────────────────────────
 ATR_PERIOD     = 14
-ATR_STOP_MULT  = 1.0   # 1× ATR stop: tighter entry, TPs reachable within 1-3 candles
+ATR_STOP_MULT  = 1.5   # 1.5× ATR stop: wider than noise floor on 15m candles (was 1.0, caused premature stops)
 ATR_TRAIL_MULT = 1.0   # spec aligned
 RSI_PERIOD     = 14
 RSI_EXIT_LONG  = 78    # spec aligned
@@ -139,8 +139,8 @@ TP2_PCT = 0.33
 TP3_PCT = 0.34
 
 # ── Time exits (5-min cycle checks; 2h target window) ─────
-MAX_TRADE_HOURS_SPOT    = 2   # exit if trade flat after 2h
-MAX_TRADE_HOURS_FUTURES = 2
+MAX_TRADE_HOURS_SPOT    = 4   # exit if trade flat after 4h (was 2h — TP2/TP3 on 15m need 3-6h to print)
+MAX_TRADE_HOURS_FUTURES = 4
 CYCLE_SLEEP_SECONDS     = 60   # 1-minute update window
 
 # ── Alerts ────────────────────────────────────────────────
