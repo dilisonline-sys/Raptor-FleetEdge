@@ -9,7 +9,7 @@ from aiohttp import web
 from logger import log
 import config as cfg
 
-VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO", "ANALYST_ON", "ANALYST_OFF", "SET_STRATEGY"}
+VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO", "ANALYST_ON", "ANALYST_OFF", "SET_STRATEGY", "SET_RISK"}
 
 _state = {
     "started_at":    time.time(),
@@ -208,7 +208,21 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
   <div class="card"><div class="lbl">Uptime</div><div class="val g" id="c-up">—</div></div>
   <div class="card"><div class="lbl">Fear &amp; Greed</div><div class="val" id="c-fg" style="font-size:1rem">—</div></div>
   <div class="card"><div class="lbl">Interval</div><div class="val y" id="c-interval">—</div></div>
-  <div class="card"><div class="lbl">Risk / Max Trade</div><div class="val" id="c-risk">—</div></div>
+  <div class="card">
+    <div class="lbl">Risk / Max Trade</div>
+    <div style="display:flex;align-items:center;gap:4px;margin-top:5px">
+      <input id="inp-risk" type="number" min="1" max="100" step="1" value="10"
+             style="width:44px;background:#111;border:1px solid #333;color:#ffd600;padding:2px 4px;border-radius:3px;font-size:.75rem;font-family:inherit;text-align:center"
+             title="Risk % per trade">
+      <span style="color:#555;font-size:.68rem">%&nbsp;/</span>
+      <input id="inp-max-trade" type="number" min="1" max="100" step="1" value="30"
+             style="width:44px;background:#111;border:1px solid #333;color:#ffd600;padding:2px 4px;border-radius:3px;font-size:.75rem;font-family:inherit;text-align:center"
+             title="Max trade % of equity">
+      <span style="color:#555;font-size:.68rem">%</span>
+      <button onclick="applyRisk()"
+              style="background:#1a1400;border:1px solid #665500;color:#ffd600;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:.65rem;font-family:inherit;margin-left:2px">OK</button>
+    </div>
+  </div>
   <div class="card"><div class="lbl">Cycle</div><div class="val" id="c-cycle">—</div></div>
   <div class="card"><div class="lbl">Strategy</div><div class="val g" id="c-strat">—</div></div>
   <div class="card" id="port-card">
@@ -730,6 +744,20 @@ async function toggleStrategy(key) {
   }).catch(()=>{});
 }
 
+async function applyRisk() {
+  const risk = parseFloat(document.getElementById('inp-risk').value);
+  const maxT = parseFloat(document.getElementById('inp-max-trade').value);
+  if (isNaN(risk) || isNaN(maxT) || risk < 1 || risk > 100 || maxT < 1 || maxT > 100) return;
+  const btn = document.querySelector('[onclick="applyRisk()"]');
+  if (btn) { btn.textContent = '✓'; btn.style.color = '#00e676'; }
+  await fetch('/instruction', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
+    body: JSON.stringify({action:'SET_RISK', risk_pct: risk/100, max_trade_pct: maxT/100, source:'dashboard'}),
+  }).catch(()=>{});
+  setTimeout(() => { if (btn) { btn.textContent = 'OK'; btn.style.color = '#ffd600'; } }, 1500);
+}
+
 function renderCards(s) {
   const upSec = Math.floor(Date.now()/1000 - startedAt);
   const h = Math.floor(upSec/3600), m = Math.floor((upSec%3600)/60);
@@ -773,7 +801,12 @@ function renderCards(s) {
   setEl('c-sig', s.last_signal || '—');
   setEl('c-up',  `${h}h ${m}m`);
   setEl('c-interval', s.interval || '—');
-  setEl('c-risk', s.risk_pct ? (s.risk_pct*100).toFixed(0)+'% / '+(s.max_trade_pct*100).toFixed(0)+'%' : '—');
+  if (s.risk_pct != null) {
+    const ri = document.getElementById('inp-risk');
+    const mi = document.getElementById('inp-max-trade');
+    if (ri && document.activeElement !== ri) ri.value = Math.round(s.risk_pct * 100);
+    if (mi && document.activeElement !== mi) mi.value = Math.round(s.max_trade_pct * 100);
+  }
   setEl('c-cycle', s.cycle_sleep ? s.cycle_sleep+'s' : '—');
   setEl('c-strat', s.strategy || '—');
   document.getElementById('chart-sym-title').textContent = s.symbol || '—';
@@ -1241,7 +1274,7 @@ def update_open_pos(pos_info: dict | None):
     _state["open_pos"] = pos_info
 
 
-URGENT_ACTIONS = {"FORCE_BTC", "HALT", "CLOSE_ALL", "SWITCH_COIN", "RESUME_AUTO", "SELL", "SET_STRATEGY"}  # wake the main loop immediately
+URGENT_ACTIONS = {"FORCE_BTC", "HALT", "CLOSE_ALL", "SWITCH_COIN", "RESUME_AUTO", "SELL", "SET_STRATEGY", "SET_RISK"}  # wake the main loop immediately
 
 # Module-level wake event — agent imports and awaits this during its sleep
 wake_event: asyncio.Event | None = None

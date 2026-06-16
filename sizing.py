@@ -9,9 +9,13 @@ class PositionSizer:
     def calculate(equity: float, entry_price: float, stop_distance: float,
                   size_mult: float, correlated: bool = False,
                   usdt_available: float | None = None,
-                  pool_budget: float | None = None) -> float | None:
+                  pool_budget: float | None = None,
+                  risk_pct: float | None = None,
+                  max_trade_pct: float | None = None) -> float | None:
 
-        risk_amount = equity * cfg.RISK_PCT
+        _risk_pct      = risk_pct      if risk_pct      is not None else cfg.RISK_PCT
+        _max_trade_pct = max_trade_pct if max_trade_pct is not None else cfg.MAX_TRADE_PCT
+        risk_amount = equity * _risk_pct
         if stop_distance <= 0:
             log("MODULE_2", "SIZING_ABORT", reason="stop_distance <= 0")
             return None
@@ -34,7 +38,7 @@ class PositionSizer:
             adjusted_qty *= 0.5
 
         # Hard caps
-        max_by_trade = (equity * cfg.MAX_TRADE_PCT) / entry_price
+        max_by_trade = (equity * _max_trade_pct) / entry_price
         final_qty    = min(adjusted_qty, max_by_trade)
 
         # Pool budget cap: shared equity pool limits per-agent deployment
@@ -59,7 +63,8 @@ class PositionSizer:
             return None
 
         log("MODULE_2", "SIZING_CALC",
-            equity=equity, risk_amount=risk_amount,
+            equity=equity, risk_pct=round(_risk_pct*100,1), risk_amount=risk_amount,
+            max_trade_pct=round(_max_trade_pct*100,1),
             base_qty=round(base_qty, 6), vol_mult=vol_mult,
             size_mult=size_mult, final_qty=round(final_qty, 6),
             usdt_cap=round(usdt_available, 2) if usdt_available else None,
