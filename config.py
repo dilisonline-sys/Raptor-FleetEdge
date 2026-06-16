@@ -117,8 +117,7 @@ _RISK = {
 # ── Entry filters ─────────────────────────────────────────
 MAX_SPREAD_PCT  = 0.003    # 0.30%
 MIN_VOLUME_USDT = 15_000_000  # $15M 24h volume — filters out micro-caps that spike and reverse
-MIN_PRICE       = 0.50    # Solution 2: raised from $0.05 — below $0.50, tick size eats into
-                          # the 0.15% fee break-even (XPLUSDT at $0.08 = 0.125%/tick)
+MIN_PRICE       = 50.0    # Only trade coins above $50 — filters out low-value altcoins
 MAX_FUNDING     = 0.0010   # 0.1% per 8h — spec aligned
 MAX_SLIPPAGE    = 0.0010   # 0.1% — spec aligned
 

@@ -32,7 +32,7 @@ FLAT_CANDLES     = 4         # look-back window (completed candles)
 FLAT_MIN_PASS    = 2         # need ≥ 2 of FLAT_CANDLES with body > fee_threshold
 DAILY_RANGE_MIN  = 0.010     # 1.0% minimum 24h range for any coin
 BTC_DAILY_RANGE_MIN = 0.015  # 1.5% for BTC specifically (Solution 3)
-MIN_PRICE_HEALTH = 0.50      # $0.50 floor applied by health check (Solution 2)
+MIN_PRICE_HEALTH = 50.0      # $50 floor — only trade coins above this price
 
 
 @dataclass
