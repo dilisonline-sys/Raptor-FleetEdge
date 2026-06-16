@@ -664,6 +664,9 @@ async def main_loop():
                         await md.connect()
                         update_state(symbol=active_symbol, coin_mode=requested)
                         none_signal_streak = 0
+                        if risk.clear_if_consec_loss(active_symbol):
+                            push_log(f"[COIN_SELECT] Consecutive-loss halt cleared — fresh start on {active_symbol}")
+                            update_state(halt=False)
                     elif em.positions:
                         push_log(f"[COIN_SELECT] Cannot switch while position open — close first")
                 elif action in ("BUY", "SELL"):
@@ -798,6 +801,9 @@ async def main_loop():
                         _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
                         update_state(symbol=active_symbol)
                         gate_fail_streak = 0
+                        if risk.clear_if_consec_loss(active_symbol):
+                            push_log(f"[ROTATE] Consecutive-loss halt cleared — fresh start on {active_symbol}")
+                            update_state(halt=False)
                 await _cycle_sleep()
                 continue
             gate_fail_streak = 0
@@ -997,6 +1003,9 @@ async def main_loop():
                         _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
                         update_state(symbol=active_symbol, coin_mode="auto")
                         none_signal_streak = 0
+                        if risk.clear_if_consec_loss(active_symbol):
+                            push_log(f"[ROTATE] Consecutive-loss halt cleared — fresh start on {active_symbol}")
+                            update_state(halt=False)
 
                 await _cycle_sleep()
                 continue
@@ -1219,6 +1228,9 @@ async def main_loop():
                     _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
                     update_state(symbol=active_symbol, coin_mode="auto")
                     none_signal_streak = 0
+                    if risk.clear_if_consec_loss(active_symbol):
+                        push_log(f"[ROTATE] Consecutive-loss halt cleared — fresh start on {active_symbol}")
+                        update_state(halt=False)
                     await _cycle_sleep()
                     continue
 
@@ -1268,6 +1280,9 @@ async def main_loop():
                     _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
                     update_state(symbol=active_symbol, coin_mode=active_symbol)  # lock to target; use RESUME_AUTO to release
                     none_signal_streak = 0
+                    if risk.clear_if_consec_loss(active_symbol):
+                        push_log(f"[FORCE_SWITCH] Consecutive-loss halt cleared — fresh start on {active_symbol}")
+                        update_state(halt=False)
                 await _cycle_sleep()
                 continue
 
@@ -1566,6 +1581,9 @@ async def main_loop():
                                         _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
                                         update_state(symbol=active_symbol)
                                         none_signal_streak = 0
+                                        if risk.clear_if_consec_loss(active_symbol):
+                                            push_log(f"[SELECT] Consecutive-loss halt cleared — fresh start on {active_symbol}")
+                                            update_state(halt=False)
                                     selector.last_result = {}
                                     _assigned = True
                                     break

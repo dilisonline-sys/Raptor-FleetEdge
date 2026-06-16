@@ -731,9 +731,14 @@ async function toggleStrategy(key) {
   if (_strategyKeys.includes(key)) {
     if (_strategyKeys.length === 1) return;   // can't deselect the only strategy
     _strategyKeys = _strategyKeys.filter(k => k !== key);
-  } else {
-    if (_strategyKeys.length >= 3) return;    // max 3 simultaneous strategies
+  } else if (_strategyKeys.length === 1) {
+    // Single-strategy mode: replace the current primary (switch, not add secondary)
+    _strategyKeys = [key];
+  } else if (_strategyKeys.length < 3) {
+    // Multi-strategy mode: add as secondary (already have a primary)
     _strategyKeys = [..._strategyKeys, key];
+  } else {
+    return;  // already at max 3
   }
   _strategyKey = _strategyKeys[0];
   renderStrategySelector(_strategyKeys);

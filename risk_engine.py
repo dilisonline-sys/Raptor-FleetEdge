@@ -32,6 +32,20 @@ class RiskEngine:
         self.halt_reason = reason
         log("MODULE_7", "HALT_SET", reason=reason, hours=hours, equity=round(equity, 2))
 
+    def clear_if_consec_loss(self, new_symbol: str = "") -> bool:
+        """Clear halt when it was caused by consecutive losses and the coin has changed.
+        Daily/monthly drawdown halts are NOT cleared — those protect total capital.
+        Returns True if halt was cleared."""
+        if self.halt_flag and "consecutive losses" in (self.halt_reason or ""):
+            self.halt_flag     = False
+            self.halt_until    = 0.0
+            self.consec_losses = 0
+            self.halt_reason   = ""
+            log("MODULE_7", "HALT_CLEARED_ROTATION",
+                new_symbol=new_symbol, note="consecutive-loss halt reset for new coin")
+            return True
+        return False
+
     def record_trade(self, pnl: float, equity: float):
         self.trade_history.append({"pnl": pnl, "ts": time.time()})
         if pnl < 0:
