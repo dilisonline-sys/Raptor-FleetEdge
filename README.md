@@ -8,17 +8,19 @@
 
 Raptor FleetEdge is a multi-agent cryptocurrency trading system built for Binance Spot. A **fleet manager** spawns up to **5 independent trading agents**, each watching a different coin. The system:
 
-- Runs a live volatility-chase strategy on 15-minute candles
-- Classifies market regime (TRENDING / RANGING / VOLATILE) and only enters on TRENDING
-- Uses EMA 9/21/50 stack, RSI, MACD, ATR, Bollinger Bands, and VWAP
+- Runs one of **5 selectable strategies** per agent on 15-minute candles, switchable live from the dashboard
+- Supports **1–3 simultaneous strategies per agent** — primary drives the signal, secondaries apply a consensus veto
+- Classifies market regime (TRENDING / RANGING / VOLATILE) and filters entries accordingly
+- Uses EMA 9/21/50 stack, RSI, MACD, ATR, Bollinger Bands, ADX, Stochastic RSI, Choppiness Index, and VWAP
+- **Strategy Advisor** scores all 5 strategies against live indicators every cycle and highlights the best fit on the dashboard
 - Sizes positions dynamically based on ATR and account equity
-- Manages exits with a 3-tier TP ladder aligned to the past 1-hour price range
+- Manages exits with a **staircase stop + 3-tier TP ladder**: stop locks to TP1 price after TP1 hits, locks to TP2 price after TP2 hits
 - **Agent 1 (slot 0)** is permanently locked to BTCUSDT
 - **Agents 2–4 (slots 1–3)** use momentum strategy and rotate to the best-ranked coins
 - **Agent 5 (slot 4)** runs EMA Crossover strategy, permanently locked to ETHUSDT
 - Liquidates base asset back to USDT automatically before every coin rotation (slots 1–3)
 - Persists open positions across restarts — exact entry, stop, and TP values are restored
-- Each agent exposes a live dashboard with 1-second candle charts, rule analyst panel, and order log
+- Each agent exposes a live dashboard with real-time candle charts, toggleable indicator overlays (BB, EMA50, MACD, RSI, Volume, Forecast), rule analyst panel, and order log
 - Pre-screens every candidate coin for structural fee viability before assignment (coin health filter)
 - Neural network (pure NumPy MLP) augments entry decisions when trained OOS accuracy ≥ 58%
 
@@ -125,10 +127,14 @@ http://localhost:7430
 
 Each agent dashboard includes:
 - **1-second live candle chart** — builds from the SSE price stream in real time
-- **EMA 9/21 overlay** — refreshed each trading cycle (~60s)
+- **EMA 9/21 overlay** — always visible; EMA 50 and Bollinger Bands toggled via indicator buttons
+- **Toggleable indicator overlays** — BB, EMA50 on the main chart; MACD histogram, RSI 14, Volume, and Forecast projection as sub-panels below (MACD, BB, EMA50 are on by default)
+- **Forecast sub-chart** — linear regression on last 20 candles projected 6 bars forward with ±1 ATR confidence bands
+- **Strategy Advisor bar** — shows best-fit strategy and score (0–10) with plain-English reason; advised strategy is highlighted with a dashed border on the selector
+- **Multi-strategy selector** — click up to 3 strategies simultaneously; primary (bright yellow) drives the signal, secondaries (gold outline) apply a consensus veto on opposing signals
 - **USDT balance + coin asset value** — live from Binance
 - **Signal / regime / RSI / MACD** — current indicator readings
-- **Open positions** with entry, stop, TP1/TP2/TP3 lines on chart
+- **Open positions** with entry, stop, TP1/TP2 price lines on chart (stop auto-advances with staircase logic)
 - **Portfolio card** — full account value: USDT + active spot positions + Simple Earn holdings
 - **Rule Analyst panel** — indicator-driven advisory read, enable/disable per dashboard
 - **Order log** — recent fills and open orders
@@ -298,7 +304,7 @@ Agents in slots 1–3 automatically rotate to the best-ranked coin when:
 | Quality gate escape | 2 consecutive data quality fails on the current coin |
 | Ranging escape | Current coin classified RANGING — rotates to next ranked coin |
 | Volatile escape | Current coin VOLATILE for 10+ minutes — forces rotation |
-| Signal rotate | No tradeable setup for 3 consecutive cycles |
+| Signal rotate | No tradeable setup for 6 consecutive cycles (~6 minutes) |
 | SELL with no position | Bear signal on a coin we don't hold — rotates immediately |
 | Manual `SWITCH_COIN` | Operator-requested switch via instruction endpoint |
 | Manual `FORCE_BTC` | Forces switch to BTCUSDT |
@@ -331,26 +337,47 @@ Every BUY signal passes through a chain of gates before an order is placed. Any 
 
 ---
 
-## Signal Engine
+## Strategies
 
-Signals are computed from the **previous completed 15m candle** (not the live forming candle) to avoid entry on transient tick noise.
+Each agent runs one **primary strategy** (drives entry signals) and optionally one or two **secondary strategies** (consensus veto only — if a secondary fires the opposite direction, the primary's signal is suppressed to NONE). Strategy is switchable live from the dashboard; changes take effect within 1–2 seconds.
 
-| Signal | Required conditions |
+### Strategy Advisor
+
+Every cycle the **Strategy Advisor** scores all 5 strategies against the current market indicators (0–10 scale) and displays the best-fit recommendation on the dashboard. It does not auto-switch — it is advisory only. Scoring inputs:
+
+| Indicator | Role in advisor |
 |---|---|
-| `BUY` (momentum) | EMA9 > EMA21 > EMA50 AND RSI < 70 AND MACD > signal AND price > EMA21 AND candle not bearish |
-| `BUY` (pullback) | EMA stack bullish AND RSI < 35 AND price > EMA50 |
-| `BUY` (BB bounce) | Price at/below lower BB AND RSI < 32 AND bullish EMA stack |
-| `SELL` (momentum) | EMA stack bearish AND RSI > 30 AND MACD < signal AND price < EMA21 AND bullish candle |
-| `SELL` (pullback) | EMA stack bearish AND RSI > 65 AND price < EMA21 |
+| ADX 14 | Trend strength — >25 = trending, <15 = weak/ranging |
+| Choppiness Index 14 | Market structure — <45 = trending, >58 = choppy |
+| BB Width % | Squeeze detection — <2.5% signals imminent breakout |
+| Volume Ratio | Current bar vs 20-bar SMA — >1.5 = surge confirmation |
+| Stochastic RSI %K | Sensitive reversal signal |
+| RSI 14 | Overbought/oversold level |
+| Regime | TRENDING / RANGING / VOLATILE from RegimeClassifier |
 
-### EMA Cross Strategy (Slot 4)
+### Available Strategies
 
-Agent 5 uses a dedicated crossover strategy on closed candles only:
-- **Golden cross** (EMA9 crosses above EMA21) → BUY
-- **Death cross** (EMA9 crosses below EMA21) → SELL/close
-- New entries are blocked during VOLATILE regime (5%+ ATR/price flash-crash guard)
+| Key | Name | Best in | Entry condition summary |
+|---|---|---|---|
+| `momentum` | Volatility Chase | TRENDING, high ADX | EMA9>21>50 + MACD > signal + RSI < 70 |
+| `ema_cross` | EMA Cross | TRENDING, ADX ≥ 18 | Golden/death cross on closed candles; filtered when ADX < 18 |
+| `rsi_reversal` | RSI Mean Reversion | RANGING, Stoch-RSI extreme | RSI < 32 or > 68 with band-touch confirmation |
+| `macd_cross` | MACD Crossover | TRENDING | MACD histogram cross with EMA alignment |
+| `bb_breakout` | Bollinger Band Bounce | RANGING, squeeze + band touch | Price at/beyond BB edge after squeeze; RSI confirms |
 
-The regime classifier uses `ind["close"]` (not VWAP) for the ATR-to-price ratio — making the VOLATILE threshold consistent with what the scanner and signal engine observe.
+Signals are computed from the **previous completed 15m candle** to avoid entry on transient tick noise.
+
+### Multi-Strategy Consensus
+
+When 2–3 strategies are active simultaneously:
+- The **primary** (first selected, bright yellow button) computes the entry signal as normal
+- Each **secondary** (gold outline button) independently evaluates the same indicators
+- If any secondary returns the **opposite direction** (e.g. primary says BUY, secondary says SELL), the signal is vetoed to NONE
+- Secondaries that return NONE do not veto — only an explicit opposite signal blocks entry
+
+### EMA Cross — ADX Filter
+
+The EMA Cross strategy applies an additional ADX gate: if ADX < 18 at signal time, the cross is classified as occurring in a choppy/ranging market and the signal is discarded. This prevents false crosses from generating entries when there is no trend to ride.
 
 ---
 
@@ -406,7 +433,16 @@ If the per-slot equity share falls below the Binance $10 minimum order, the syst
 | TP2 | 2.5× ATR (or 80% of 1h range, whichever is larger) | 33% |
 | TP3 | 4.0× ATR (or 125% of 1h range, whichever is larger) | 34% (full remaining) |
 
-All three levels are now fully wired: TP3 fires a market sell for the remaining position and records P&L.
+All three levels are fully wired: TP3 fires a market sell for the remaining position and records P&L.
+
+### Staircase Stop
+
+After each TP level is hit the **stop is locked to that TP price**, preventing the remaining position from giving back secured profit:
+
+- **TP1 hit** → stop moves to TP1 price (guaranteed break-even+ on remaining 67%)
+- **TP2 hit** → stop moves to TP2 price (TP3 runner can never lose TP2 gains)
+
+The staircase activates only if the new stop level is above (for BUY) or below (for SELL) the current stop — it never widens the stop.
 
 ---
 
@@ -478,6 +514,7 @@ Each agent accepts POST instructions at `/instruction`. Valid actions:
 | `FORCE_BTC` | Switch to BTCUSDT immediately |
 | `ANALYST_ON` | Enable the Rule Analyst |
 | `ANALYST_OFF` | Disable the Rule Analyst |
+| `SET_STRATEGY` | Switch active strategy — send `{"strategy":"momentum"}` (single) or `{"strategies":["momentum","rsi_reversal"]}` (multi, max 3); takes effect within 1–2 seconds |
 
 Example — halt BTC agent:
 
@@ -540,10 +577,11 @@ Before switching to `TRADING_MODE=live`:
 | `MAX_TRADE_PCT` | `0.15` | Max fraction of equity deployed in one position (15%) |
 | `MAX_EXPOSURE` | `0.40` | Max fraction of total equity deployed fleet-wide (40%) |
 | `FLEET_SIZE` | `5` | Number of agent slots sharing the pool |
-| `ATR_STOP_MULT` | `1.0` | Stop distance = 1× ATR from entry |
+| `ATR_STOP_MULT` | `1.5` | Stop distance = 1.5× ATR from entry (wider than 15m candle noise) |
 | `TP1_R` | `1.5` | TP1 = 1.5× stop distance |
 | `TP2_R` | `2.5` | TP2 = 2.5× stop distance |
 | `TP3_R` | `4.0` | TP3 = 4.0× stop distance (remaining position exits here) |
+| `MAX_TRADE_HOURS_SPOT` | `4` | Exit flat positions after 4h (TP2/TP3 need 3–6h to print on 15m) |
 | `DAILY_DD_LIMIT` | `0.10` | Halt after 10% daily drawdown |
 | `MONTHLY_DD_LIMIT` | `0.15` | Halt after 15% monthly drawdown |
 | `MAX_CONSEC_LOSS` | `3` | Halt after 3 consecutive losing trades |
@@ -573,7 +611,11 @@ Before switching to `TRADING_MODE=live`:
 | `rule_analyst.py` | Indicator-driven advisory analyst |
 | `rule_coin_selector.py` | Rule-based profitability coin selector |
 | `nn_predictor.py` | Pure-NumPy MLP — trains on live candle data to confirm entry direction |
-| `ema_cross_module.py` | EMA crossover signal engine for slot 4 |
+| `ema_cross_module.py` | EMA crossover signal engine (golden/death cross on closed candles) |
+| `rsi_reversal_module.py` | RSI mean-reversion signal engine |
+| `macd_cross_module.py` | MACD histogram crossover signal engine |
+| `bb_breakout_module.py` | Bollinger Band bounce signal engine |
+| `strategy_advisor_module.py` | Scores all 5 strategies (0–10) against live indicators each cycle; powers dashboard advisor bar |
 | `email_notifier.py` | Email alerts — fills, rotations, 4h P&L reports |
 | `instruction_server.py` | Per-agent HTTP dashboard and instruction endpoint |
 | `config.py` | All parameters in one place |
@@ -678,6 +720,25 @@ This section documents all defects identified and resolved across three independ
 | L-2 | Low | `agent.py` | Same as M-5 — TP partial close P&L not fed to `risk.record_trade()`; resolved together with M-5 |
 | L-3 | Low | `agent.py` | Background scanner loop slept only 60s but `SCAN_INTERVAL=300s` — scanner fired 5× per interval, burning API rate limit on redundant scans; sleep changed to `270s` |
 | NH-3 | Low | `agent.py` | Old session equity files from previous calendar days accumulated in `/tmp`; cleanup now runs on startup, removing files whose date does not match today |
+
+### Round 4 — Strategy & Profitability Overhaul
+
+| ID | File | Fix / Feature |
+|---|---|---|
+| S-1 | `instruction_server.py` | `SET_STRATEGY` not in `URGENT_ACTIONS` — strategy changes sat in queue up to 60s before taking effect; added to urgent set so wake event fires immediately |
+| S-2 | `exit_manager.py` | Staircase stop: after TP1 hit, stop is locked to TP1 price; after TP2 hit, stop locked to TP2 price — prevents remaining position giving back secured levels |
+| S-3 | `market_data.py` | Six indicators missing from `compute_indicators()` that strategy advisor and filters require: `adx14`, `macd_hist`, `bb_width`, `bb_pct`, `stoch_rsi_k`, `choppiness14`, `volume_ratio` — all added |
+| S-4 | `strategy_advisor_module.py` | New module: scores all 5 strategies against live indicators every cycle (0–10 scale); result shown on dashboard advisor bar |
+| S-5 | `agent.py` | `_strategies` list added (max 3); `SET_STRATEGY` now accepts `{strategies:[...]}` list or legacy single `{strategy:""}` — enables multi-strategy consensus mode |
+| S-6 | `agent.py` | Secondary strategy consensus veto: if any secondary strategy signals the opposite direction to the primary, signal is suppressed to NONE before execution |
+| S-7 | `agent.py` | EMA Cross ADX filter: cross signals discarded when ADX < 18 — prevents false crosses in choppy/ranging markets (primary cause of EMA cross losses on ETHUSDT) |
+| S-8 | `config.py` | `ATR_STOP_MULT` 1.0 → 1.5 — 1× ATR too tight vs 15m crypto noise; stops hit before any TP level could be reached |
+| S-9 | `config.py` | `MAX_TRADE_HOURS_SPOT/FUTURES` 2h → 4h — TP2 (2.5R) and TP3 (4R) on 15m candles typically need 3–6h; time exits triggered before targets |
+| S-10 | `agent.py` | `NONE_SIGNAL_ROTATE` 3 → 6 cycles — 3-minute coin rotation was excessive churn; 6 minutes gives setups time to develop |
+| S-11 | `instruction_server.py` | Chart `refreshChart()` now caches `_lastChartData` and applies all active indicator overlays (BB, EMA50) and sub-panels (MACD, RSI, Volume, Forecast) on every reload |
+| S-12 | `instruction_server.py` | Multi-strategy UI: strategy buttons support multi-select (click to add/remove, max 3); primary = bright yellow, secondary = gold outline, inactive = grey |
+| S-13 | `instruction_server.py` | MACD, BB, and EMA50 enabled by default on all chart loads; MACD sub-panel pre-initialised at boot |
+| S-14 | `agent.py` | Strategy advisor scores pushed to agent state each cycle (`advised_strategy`, `advised_strategy_score`, `strategy_scores[]`) for dashboard display |
 
 ---
 
