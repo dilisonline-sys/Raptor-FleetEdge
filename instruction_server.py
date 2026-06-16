@@ -750,11 +750,20 @@ async function applyRisk() {
   if (isNaN(risk) || isNaN(maxT) || risk < 1 || risk > 100 || maxT < 1 || maxT > 100) return;
   const btn = document.querySelector('[onclick="applyRisk()"]');
   if (btn) { btn.textContent = '✓'; btn.style.color = '#00e676'; }
-  await fetch('/instruction', {
+  const payload = {action:'SET_RISK', risk_pct: risk/100, max_trade_pct: maxT/100, source:'dashboard'};
+  // Broadcast to all agents via manager; fall back to local agent if manager unreachable
+  const sent = await fetch('/api/broadcast', {
     method: 'POST',
     headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
-    body: JSON.stringify({action:'SET_RISK', risk_pct: risk/100, max_trade_pct: maxT/100, source:'dashboard'}),
-  }).catch(()=>{});
+    body: JSON.stringify(payload),
+  }).catch(()=>null);
+  if (!sent || !sent.ok) {
+    await fetch('/instruction', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
+      body: JSON.stringify(payload),
+    }).catch(()=>{});
+  }
   setTimeout(() => { if (btn) { btn.textContent = 'OK'; btn.style.color = '#ffd600'; } }, 1500);
 }
 
