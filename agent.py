@@ -230,8 +230,10 @@ async def main_loop():
     fg       = FearGreedClient()
     _agent_slot = int(os.environ.get("AGENT_SLOT", "0"))
     _agent_name = os.environ.get("AGENT_NAME", f"fleetedge{_agent_slot + 1}")
-    _strategy   = os.environ.get("AGENT_STRATEGY", "momentum").lower()
+    _strategy      = os.environ.get("AGENT_STRATEGY", "momentum").lower()
     _strategies: list = [_strategy]    # multi-strategy list; [0] = primary driver
+    _risk_pct      = cfg.RISK_PCT       # overridable per-agent risk fraction
+    _max_trade_pct = cfg.MAX_TRADE_PCT  # overridable per-agent max-trade fraction
     analyst   = RuleAnalyst()
     selector  = RuleCoinSelector()
     # NM-3: predictor is only used by momentum — skip heavy numpy weight init for all other strategies
@@ -499,7 +501,8 @@ async def main_loop():
                  session_start_ts=_session_start_ts,
                  session_pnl=0.0, session_pnl_pct=0.0,
                  strategy=_strategy_label, strategy_key=_strategy,
-                 strategy_keys=_strategies)
+                 strategy_keys=_strategies,
+                 risk_pct=_risk_pct, max_trade_pct=_max_trade_pct)
 
     # ── Staggered startup: let earlier slots register in pool before this one
     # scans for a coin, preventing all agents from picking the same top coin simultaneously.
@@ -712,6 +715,17 @@ async def main_loop():
                                  + (f" + {_sec}" if _sec else ""))
                         log("AGENT", "STRATEGY_SWITCHED", from_=_old_strat, to=_strategy,
                             secondaries=_strategies[1:])
+                elif action == "SET_RISK":
+                    _new_r = instr.get("risk_pct")
+                    _new_m = instr.get("max_trade_pct")
+                    if _new_r is not None:
+                        _risk_pct = max(0.001, min(float(_new_r), 1.0))
+                    if _new_m is not None:
+                        _max_trade_pct = max(0.001, min(float(_new_m), 1.0))
+                    update_state(risk_pct=_risk_pct, max_trade_pct=_max_trade_pct)
+                    push_log(f"[SET_RISK] risk={_risk_pct*100:.1f}%  max_trade={_max_trade_pct*100:.1f}%")
+                    log("AGENT", "RISK_UPDATED",
+                        risk_pct=round(_risk_pct, 4), max_trade_pct=round(_max_trade_pct, 4))
             except asyncio.QueueEmpty:
                 pass
 
@@ -1414,10 +1428,12 @@ async def main_loop():
                     stop_d=round(stop_d, 4), size_mult=size_mult)
                 qty    = PositionSizer.calculate(equity, current_price, stop_d, size_mult,
                                                  usdt_available=raw_usdt,
-                                                 pool_budget=pool_budget)
+                                                 pool_budget=pool_budget,
+                                                 risk_pct=_risk_pct,
+                                                 max_trade_pct=_max_trade_pct)
 
                 if not qty:
-                    _order_usdt = (equity * cfg.RISK_PCT / stop_d * current_price) if stop_d else 0
+                    _order_usdt = (equity * _risk_pct / stop_d * current_price) if stop_d else 0
                     push_log(f"[SKIP] {active_symbol} sizing aborted — "
                              f"equity=${equity:.2f} pool_budget=${pool_budget:.2f} "
                              f"est_order=${min(_order_usdt, pool_budget):.2f} "
