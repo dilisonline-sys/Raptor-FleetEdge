@@ -231,6 +231,7 @@ async def main_loop():
     _agent_slot = int(os.environ.get("AGENT_SLOT", "0"))
     _agent_name = os.environ.get("AGENT_NAME", f"fleetedge{_agent_slot + 1}")
     _strategy   = os.environ.get("AGENT_STRATEGY", "momentum").lower()
+    _strategies: list = [_strategy]    # multi-strategy list; [0] = primary driver
     analyst   = RuleAnalyst()
     selector  = RuleCoinSelector()
     # NM-3: predictor is only used by momentum — skip heavy numpy weight init for all other strategies
@@ -423,7 +424,7 @@ async def main_loop():
     _nn_cycle_count:     int        = 0     # incremented each cycle; triggers NN retrain at interval
     VOLATILE_ESCAPE_SECS   = 600           # 10 minutes
     GATE_FAIL_SWITCH_AFTER = 2            # switch coin after 2 straight gate fails (~2 min)
-    NONE_SIGNAL_ROTATE     = 3            # rotate to next ranked coin after 3 NONE cycles (~3 min)
+    NONE_SIGNAL_ROTATE     = 6            # rotate to next ranked coin after 6 NONE cycles (~6 min, was 3 — excessive churn)
 
     async def _cycle_sleep():
         """Sleep one cycle, but wake immediately if _wake event is fired."""
@@ -497,7 +498,8 @@ async def main_loop():
                  session_start_equity=round(_session_start_equity, 2),
                  session_start_ts=_session_start_ts,
                  session_pnl=0.0, session_pnl_pct=0.0,
-                 strategy=_strategy_label, strategy_key=_strategy)
+                 strategy=_strategy_label, strategy_key=_strategy,
+                 strategy_keys=_strategies)
 
     # ── Staggered startup: let earlier slots register in pool before this one
     # scans for a coin, preventing all agents from picking the same top coin simultaneously.
@@ -689,17 +691,27 @@ async def main_loop():
                     update_state(analyst_enabled=False, analysis={})
                     push_log("[ANALYST] Advisory analyst disabled")
                 elif action == "SET_STRATEGY":
-                    _req_strat = instr.get("strategy", "").lower().strip()
-                    if _req_strat in VALID_STRATEGIES:
-                        _old_strat  = _strategy
-                        _strategy   = _req_strat
+                    # Accept list (multi-strategy) or single key (backward compat)
+                    _req_list = instr.get("strategies", None)
+                    if _req_list is None:
+                        _req_list = [instr.get("strategy", "")]
+                    _req_list = [s.lower().strip() for s in _req_list
+                                 if s.lower().strip() in VALID_STRATEGIES][:3]
+                    if not _req_list:
+                        push_log(f"[SET_STRATEGY] No valid strategies — ignored")
+                    else:
+                        _old_strat      = _strategy
+                        _strategies     = _req_list
+                        _strategy       = _strategies[0]
                         _strategy_label = STRATEGY_LABELS[_strategy]
                         _prev_indicators = None  # reset crossover detection state
-                        update_state(strategy=_strategy_label, strategy_key=_strategy)
-                        push_log(f"[SET_STRATEGY] {_old_strat} → {_strategy} | {_strategy_label}")
-                        log("AGENT", "STRATEGY_SWITCHED", from_=_old_strat, to=_strategy)
-                    else:
-                        push_log(f"[SET_STRATEGY] Unknown strategy '{_req_strat}' — ignored")
+                        update_state(strategy=_strategy_label, strategy_key=_strategy,
+                                     strategy_keys=_strategies)
+                        _sec = _strategies[1:] or []
+                        push_log(f"[SET_STRATEGY] {_old_strat} → {_strategy}"
+                                 + (f" + {_sec}" if _sec else ""))
+                        log("AGENT", "STRATEGY_SWITCHED", from_=_old_strat, to=_strategy,
+                            secondaries=_strategies[1:])
             except asyncio.QueueEmpty:
                 pass
 
@@ -830,24 +842,76 @@ async def main_loop():
             # ── Push chart data ───────────────────────────────────
             try:
                 import pandas_ta as _ta
-                import pandas as _pd
-                c = candles["close"]
+                import math as _math
+                c   = candles["close"]
+                N   = len(c)
                 ts_idx = [int(t.timestamp()) for t in candles.index]
+
+                def _series(arr, n=N):
+                    return [{"time": ts_idx[i], "value": float(arr.iloc[i])}
+                            for i in range(n) if arr.iloc[i] == arr.iloc[i]]
+
                 chart_candles = [
                     {"time": ts_idx[i],
                      "open":  float(candles["open"].iloc[i]),
                      "high":  float(candles["high"].iloc[i]),
                      "low":   float(candles["low"].iloc[i]),
                      "close": float(c.iloc[i])}
-                    for i in range(len(candles))
+                    for i in range(N)
                 ]
                 _e9  = _ta.ema(c, 9)
                 _e21 = _ta.ema(c, 21)
-                ema9_data  = [{"time": ts_idx[i], "value": float(_e9.iloc[i])}
-                              for i in range(len(c)) if _e9.iloc[i] == _e9.iloc[i]]
-                ema21_data = [{"time": ts_idx[i], "value": float(_e21.iloc[i])}
-                              for i in range(len(c)) if _e21.iloc[i] == _e21.iloc[i]]
-                update_chart(active_symbol, chart_candles, ema9_data, ema21_data)
+                _e50 = _ta.ema(c, 50)
+                _bb  = _ta.bbands(c, 20, 2)
+                _mac = _ta.macd(c, 12, 26, 9)
+                _rsi = _ta.rsi(c, 14)
+                _atr = _ta.atr(candles["high"], candles["low"], c, 14)
+
+                # Volume: normalise to 0-100 range for display
+                _vol_raw = candles["volume"]
+                _vol_max = _vol_raw.max() or 1
+                _vol_norm = _vol_raw / _vol_max * 100
+
+                # MACD histogram sign determines bar colour
+                _mhist = _mac["MACD_12_26_9"] - _mac["MACDs_12_26_9"]
+
+                # ── Forecast: linear regression on last 20 candles, project 6 bars ──
+                _LR_WIN = min(20, N - 1)
+                _xs  = list(range(_LR_WIN))
+                _ys  = [float(c.iloc[-((_LR_WIN - i))] ) for i in range(_LR_WIN)]
+                _xm  = sum(_xs) / _LR_WIN
+                _ym  = sum(_ys) / _LR_WIN
+                _ss  = sum((x - _xm) ** 2 for x in _xs) or 1
+                _sl  = sum((_xs[i] - _xm) * (_ys[i] - _ym) for i in range(_LR_WIN)) / _ss
+                _int = _ym - _sl * _xm
+                _bar_secs = 900   # 15m candles
+                _last_ts  = ts_idx[-1]
+                _last_atr = float(_atr.dropna().iloc[-1]) if len(_atr.dropna()) else 0
+                _fc = []
+                for _fi in range(1, 7):
+                    _ft = _last_ts + _fi * _bar_secs
+                    _fv = _int + _sl * (_LR_WIN - 1 + _fi)
+                    _fc.append({"time": _ft, "value": round(_fv, 5),
+                                "hi": round(_fv + _last_atr, 5),
+                                "lo": round(_fv - _last_atr, 5)})
+
+                update_chart(active_symbol, chart_candles,
+                             ema9  = _series(_e9),
+                             ema21 = _series(_e21),
+                             ema50 = _series(_e50),
+                             bb_upper  = _series(_bb["BBU_20_2_2.0"]),
+                             bb_lower  = _series(_bb["BBL_20_2_2.0"]),
+                             macd      = _series(_mac["MACD_12_26_9"]),
+                             macd_sig  = _series(_mac["MACDs_12_26_9"]),
+                             macd_hist = [{"time": ts_idx[i],
+                                           "value": float(_mhist.iloc[i]),
+                                           "color": "#00e676" if _mhist.iloc[i] >= 0 else "#ff1744"}
+                                          for i in range(N) if _mhist.iloc[i] == _mhist.iloc[i]],
+                             rsi       = _series(_rsi),
+                             volume    = [{"time": ts_idx[i], "value": float(_vol_norm.iloc[i]),
+                                           "color": "#00e5ff33"}
+                                          for i in range(N)],
+                             forecast  = _fc)
             except Exception as ce:
                 log("AGENT", "CHART_ERROR", error=str(ce))
 
@@ -1014,8 +1078,13 @@ async def main_loop():
             # ── Signal dispatch ───────────────────────────────────
             if _strategy == "ema_cross":
                 # FIX-7: closed indicators avoid WS phantom crossovers mid-candle
+                # ADX filter: skip EMA cross in choppy markets (ADX<18 = no trend to ride)
+                _adx_ok = indicators.get("adx14", 20.0) >= 18.0
                 signal = _ema_cross.signal_engine(_closed_indicators, _ema_prev,
                                                    override=pending_override)
+                if signal in ("BUY", "SELL") and not _adx_ok:
+                    push_log(f"[EMA_CROSS] ADX {indicators.get('adx14', 0):.1f} < 18 — cross filtered (choppy)")
+                    signal = "NONE"
             elif _strategy == "rsi_reversal":
                 signal = _rsi_rev.signal_engine(indicators, override=pending_override)
             elif _strategy == "macd_cross":
@@ -1026,6 +1095,30 @@ async def main_loop():
             else:  # "momentum" (default)
                 signal = signal_engine(indicators, regime, override=pending_override)
             pending_override = None
+
+            # ── Secondary strategy consensus veto ─────────────────────────────
+            # Secondaries (_strategies[1:]) each independently evaluate. If any
+            # secondary returns the OPPOSITE direction, the primary signal is
+            # vetoed to NONE (prevents entering against a confirmed counter-signal).
+            if signal in ("BUY", "SELL") and len(_strategies) > 1:
+                _opposite = "SELL" if signal == "BUY" else "BUY"
+                for _sec_strat in _strategies[1:]:
+                    _sec_sig = "NONE"
+                    if _sec_strat == "ema_cross":
+                        _sec_sig = _ema_cross.signal_engine(_closed_indicators, _ema_prev)
+                    elif _sec_strat == "rsi_reversal":
+                        _sec_sig = _rsi_rev.signal_engine(indicators)
+                    elif _sec_strat == "macd_cross":
+                        _sec_sig = _macd_cross.signal_engine(_closed_indicators, _ema_prev)
+                    elif _sec_strat == "bb_breakout":
+                        _sec_sig = _bb_break.signal_engine(indicators)
+                    elif _sec_strat == "momentum":
+                        _sec_sig = signal_engine(indicators, regime)
+                    if _sec_sig == _opposite:
+                        push_log(f"[CONSENSUS] {_sec_strat.upper()} vetoed {signal} — "
+                                 f"secondary says {_sec_sig}")
+                        signal = "NONE"
+                        break
 
             # ── Neural network signal augmentation ───────────────────────────
             # Skipped for crossover/mean-reversion strategies — signal is self-contained.
