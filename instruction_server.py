@@ -247,10 +247,10 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 <h2 style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px">
   <span>&#9646; Chart — <span id="chart-sym-title">loading…</span></span>
   <span style="display:flex;gap:5px;flex-wrap:wrap">
-    <button class="ibtn" id="ibtn-bb"  onclick="togglePanel('bb')"  title="Bollinger Bands">BB</button>
-    <button class="ibtn" id="ibtn-e50" onclick="togglePanel('e50')" title="EMA 50">EMA50</button>
+    <button class="ibtn on" id="ibtn-bb"  onclick="togglePanel('bb')"  title="Bollinger Bands">BB</button>
+    <button class="ibtn on" id="ibtn-e50" onclick="togglePanel('e50')" title="EMA 50">EMA50</button>
     <button class="ibtn" id="ibtn-rsi" onclick="togglePanel('rsi')" title="RSI 14">RSI</button>
-    <button class="ibtn" id="ibtn-mac" onclick="togglePanel('mac')" title="MACD">MACD</button>
+    <button class="ibtn on" id="ibtn-mac" onclick="togglePanel('mac')" title="MACD">MACD</button>
     <button class="ibtn" id="ibtn-vol" onclick="togglePanel('vol')" title="Volume">VOL</button>
     <button class="ibtn" id="ibtn-fc"  onclick="togglePanel('fc')"  title="Forecast">&#8987; FC</button>
   </span>
@@ -264,18 +264,18 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
   <div class="legend" id="chart-legend">
     <span><div class="dot" style="background:#00e5ff"></div>EMA 9</span>
     <span><div class="dot" style="background:#ffd600"></div>EMA 21</span>
-    <span id="leg-e50" style="display:none"><div class="dot" style="background:#b39ddb"></div>EMA 50</span>
-    <span id="leg-bb"  style="display:none"><div class="dot" style="background:#607d8b"></div>BB Bands</span>
+    <span id="leg-e50"><div class="dot" style="background:#b39ddb"></div>EMA 50</span>
+    <span id="leg-bb"><div class="dot" style="background:#607d8b"></div>BB Bands</span>
     <span><div class="dot" style="background:#00e676;width:2px;height:12px;border-radius:0"></div>Entry</span>
     <span><div class="dot" style="background:#ff1744;width:2px;height:12px;border-radius:0"></div>Stop</span>
     <span><div class="dot" style="background:#00bcd4;width:2px;height:12px;border-radius:0"></div>TP1/TP2</span>
   </div>
-  <!-- Sub-panels (hidden by default) -->
+  <!-- Sub-panels: mac on by default; rsi/vol/fc hidden by default -->
   <div id="panel-rsi" style="display:none">
     <div style="font-size:.60rem;color:#aaa;padding:2px 6px;background:#0d0d0d">RSI 14 · oversold &lt;30 / overbought &gt;70</div>
     <div id="chart-rsi" style="height:80px"></div>
   </div>
-  <div id="panel-mac" style="display:none">
+  <div id="panel-mac" style="display:block">
     <div style="font-size:.60rem;color:#aaa;padding:2px 6px;background:#0d0d0d">MACD (12,26,9) · histogram</div>
     <div id="chart-mac" style="height:80px"></div>
   </div>
@@ -395,7 +395,7 @@ let macChart = null, macHistSeries = null, macLineSeries = null, macSigSeries = 
 let volChart = null, volSeries = null;
 let fcChart  = null, fcLineSeries = null, fcHiSeries = null, fcLoSeries = null;
 let _lastChartData = null;
-const _panelOn = { bb: false, e50: false, rsi: false, mac: false, vol: false, fc: false };
+const _panelOn = { bb: true, e50: true, rsi: false, mac: true, vol: false, fc: false };
 let startedAt = __STARTED_AT__;
 let allLogLines = [];
 let _currentSym  = '';
@@ -1170,6 +1170,8 @@ function toggleTheme() {
 })();
 // ── Boot ──────────────────────────────────────────────────
 initChart();
+// Initialise default-on sub-charts so they're ready when first chart data arrives
+_initSubChart('mac');
 renderCoinSelector([], 'auto');
 renderStrategySelector(_strategyKeys);
 refresh();
