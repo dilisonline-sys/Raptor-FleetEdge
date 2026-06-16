@@ -944,6 +944,7 @@ class AgentManager:
         self._app.router.add_post("/api/stop",             self._stop)
         self._app.router.add_get("/api/pool",              self._pool)
         self._app.router.add_post("/api/spawn-fleet",      self._spawn_fleet)
+        self._app.router.add_post("/api/broadcast",        self._broadcast)
         self._app.router.add_get("/api/email-config",      self._email_config_get)
         self._app.router.add_post("/api/email-config",     self._email_config_post)
         self._app.router.add_post("/api/email-test",       self._email_test)
@@ -1064,6 +1065,36 @@ class AgentManager:
                                     content_type=ct.split(";")[0])
         except Exception as e:
             return web.Response(text=f"Proxy error: {e}", status=502)
+
+    async def _broadcast(self, request: web.Request) -> web.Response:
+        """Fan-out a POST instruction to every running agent simultaneously."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        if not self._session or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(force_close=False))
+
+        async def _post_one(name: str, port: int):
+            url = f"http://127.0.0.1:{port}/instruction"
+            try:
+                async with self._session.post(
+                    url, json=body,
+                    headers={"Content-Type": "application/json",
+                             "X-Agent-Token": "internal"},
+                    timeout=aiohttp.ClientTimeout(total=3),
+                ) as r:
+                    return name, r.status
+            except Exception as e:
+                return name, f"err:{e}"
+
+        alive = [(n, i["port"]) for n, i in _agents.items()
+                 if _pid_alive(i.get("pid", 0))]
+        if not alive:
+            return web.json_response({"ok": True, "results": {}, "note": "no agents running"})
+        pairs = dict(await asyncio.gather(*[_post_one(n, p) for n, p in alive]))
+        return web.json_response({"ok": True, "results": pairs})
 
     async def _pool(self, _) -> web.Response:
         import json as _j
