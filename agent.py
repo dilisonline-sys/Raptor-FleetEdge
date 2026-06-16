@@ -935,6 +935,23 @@ async def main_loop():
             except Exception as ce:
                 log("AGENT", "CHART_ERROR", error=str(ce))
 
+            # ── Forecast slope (independent of chart block) ───────
+            # Linear regression on last 20 closed candles — slope used as
+            # a directional gate before BUY entries.
+            try:
+                _lr_c   = candles["close"]
+                _lr_n   = min(20, len(_lr_c) - 1)
+                _lr_xs  = list(range(_lr_n))
+                _lr_ys  = [float(_lr_c.iloc[-_lr_n + i]) for i in range(_lr_n)]
+                _lr_xm  = sum(_lr_xs) / _lr_n
+                _lr_ym  = sum(_lr_ys) / _lr_n
+                _lr_ss  = sum((x - _lr_xm) ** 2 for x in _lr_xs) or 1
+                _lr_sl  = sum((_lr_xs[i]-_lr_xm)*(_lr_ys[i]-_lr_ym)
+                              for i in range(_lr_n)) / _lr_ss
+                _fc_slope_pct = _lr_sl / current_price * 100  # % per 15m bar
+            except Exception:
+                _fc_slope_pct = 0.0  # neutral fallback — gate inactive
+
             # ── Sentiment: Fear & Greed ───────────────────────────
             fear_greed = await fg.fetch()
             fg_mult    = fg.size_multiplier()
@@ -949,7 +966,8 @@ async def main_loop():
                          symbol=active_symbol, price=current_price)
             push_log(f"[CYCLE] {active_symbol} | price={current_price:.4f} | regime={regime} "
                      f"| RSI={indicators['rsi14']:.1f} | EMA9={indicators['ema9']:.4f} "
-                     f"| ADX={indicators.get('adx14',0):.1f} | Chop={indicators.get('choppiness14',50):.1f}")
+                     f"| ADX={indicators.get('adx14',0):.1f} | Chop={indicators.get('choppiness14',50):.1f} "
+                     f"| FC={_fc_slope_pct:+.3f}%/bar")
 
             # ── Strategy Advisor ──────────────────────────────────
             _advice = _advisor.advice_payload(indicators, regime)
@@ -1400,6 +1418,17 @@ async def main_loop():
                 atr_pct_live = indicators["atr14"] / current_price * 100
                 if signal == "BUY" and atr_pct_live > MAX_ENTRY_ATR_PCT:
                     push_log(f"[SKIP] {active_symbol} ATR {atr_pct_live:.2f}% > {MAX_ENTRY_ATR_PCT}% cap — too volatile to enter safely")
+                    signal = "NONE"
+                # Forecast gate: linear regression on last 20 candles must slope upward.
+                # A downward-sloping regression means recent price action is trending lower —
+                # entering a BUY against it would be fighting the short-term trend.
+                # Threshold: 0.01%/bar filters noise on flat markets; near-zero slope = neutral = allow.
+                _FC_SLOPE_THRESHOLD = 0.01   # % per 15m bar
+                if signal == "BUY" and _fc_slope_pct < -_FC_SLOPE_THRESHOLD:
+                    push_log(f"[SKIP] {active_symbol} forecast slope {_fc_slope_pct:+.3f}%/bar "
+                             f"(downtrend) — BUY blocked by regression gate")
+                    log("AGENT", "GATE_BLOCK_FORECAST", symbol=active_symbol,
+                        slope_pct=round(_fc_slope_pct, 4), threshold=-_FC_SLOPE_THRESHOLD)
                     signal = "NONE"
                 # NH-2: gate activates only when OOS accuracy ≥ 58% AND test set ≥ 50 samples.
                 # NM-3: predictor is None for ema_cross — gate is always inactive, entry allowed.
