@@ -28,8 +28,8 @@ BATCH      = 32
 LR         = 3e-3
 
 CONF_FLOOR    = 0.55   # minimum P(up) to let a BUY signal through the NN gate
-OOS_MIN_ACC   = 0.58   # NH-2: gate only activates when OOS accuracy > 58% AND test set ≥ 50 samples
-OOS_MIN_SAMP  = 50     # NH-2: below this, OOS accuracy is statistically noise (CI spans ±16%)
+OOS_MIN_ACC   = 0.58   # NH-2: gate only activates when OOS accuracy > 58% AND test set ≥ 30 samples
+OOS_MIN_SAMP  = 30     # H-8: 200 candles yields ~38 OOS samples — 50 was never reachable, lowered to 30
 RETRAIN_EVERY = 100    # retrain every N main-loop cycles (≈ 100 min on 1-min cycle)
 
 

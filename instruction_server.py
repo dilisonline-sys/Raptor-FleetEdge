@@ -212,16 +212,19 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
     <div class="lbl">Risk / Max Trade</div>
     <div style="display:flex;align-items:center;gap:4px;margin-top:5px">
       <input id="inp-risk" type="number" min="1" max="100" step="1" value="10"
+             oninput="_riskDirty=true"
              style="width:44px;background:#111;border:1px solid #333;color:#ffd600;padding:2px 4px;border-radius:3px;font-size:.75rem;font-family:inherit;text-align:center"
              title="Risk % per trade">
       <span style="color:#555;font-size:.68rem">%&nbsp;/</span>
       <input id="inp-max-trade" type="number" min="1" max="100" step="1" value="30"
+             oninput="_riskDirty=true"
              style="width:44px;background:#111;border:1px solid #333;color:#ffd600;padding:2px 4px;border-radius:3px;font-size:.75rem;font-family:inherit;text-align:center"
              title="Max trade % of equity">
       <span style="color:#555;font-size:.68rem">%</span>
       <button onclick="applyRisk()"
               style="background:#1a1400;border:1px solid #665500;color:#ffd600;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:.65rem;font-family:inherit;margin-left:2px">OK</button>
     </div>
+    <div id="risk-applied" style="color:#555;font-size:.62rem;margin-top:3px">applied: —</div>
   </div>
   <div class="card"><div class="lbl">Cycle</div><div class="val" id="c-cycle">—</div></div>
   <div class="card"><div class="lbl">Strategy</div><div class="val g" id="c-strat">—</div></div>
@@ -749,6 +752,8 @@ async function toggleStrategy(key) {
   }).catch(()=>{});
 }
 
+let _riskDirty = false;
+
 async function applyRisk() {
   const risk = parseFloat(document.getElementById('inp-risk').value);
   const maxT = parseFloat(document.getElementById('inp-max-trade').value);
@@ -769,6 +774,7 @@ async function applyRisk() {
       body: JSON.stringify(payload),
     }).catch(()=>{});
   }
+  _riskDirty = false;  // inputs now match what was sent — SSE may sync freely
   setTimeout(() => { if (btn) { btn.textContent = 'OK'; btn.style.color = '#ffd600'; } }, 1500);
 }
 
@@ -816,10 +822,18 @@ function renderCards(s) {
   setEl('c-up',  `${h}h ${m}m`);
   setEl('c-interval', s.interval || '—');
   if (s.risk_pct != null) {
-    const ri = document.getElementById('inp-risk');
-    const mi = document.getElementById('inp-max-trade');
-    if (ri && document.activeElement !== ri) ri.value = Math.round(s.risk_pct * 100);
-    if (mi && document.activeElement !== mi) mi.value = Math.round(s.max_trade_pct * 100);
+    const rv = Math.round(s.risk_pct * 100);
+    const mv = Math.round((s.max_trade_pct || 0) * 100);
+    // Only push values into the inputs when the user hasn't touched them
+    if (!_riskDirty) {
+      const ri = document.getElementById('inp-risk');
+      const mi = document.getElementById('inp-max-trade');
+      if (ri) ri.value = rv;
+      if (mi) mi.value = mv;
+    }
+    // Always update the applied display so the user can see the live active value
+    const lbl = document.getElementById('risk-applied');
+    if (lbl) lbl.textContent = `applied: ${rv}% / ${mv}%`;
   }
   setEl('c-cycle', s.cycle_sleep ? s.cycle_sleep+'s' : '—');
   setEl('c-strat', s.strategy || '—');
@@ -1435,11 +1449,11 @@ class InstructionServer:
         if action not in VALID_ACTIONS:
             return web.json_response({"error": f"unknown action: {action}"}, status=400)
         instruction = {
-            "action":   action,
-            "symbol":   body.get("symbol", cfg.SYMBOL),
-            "qty_pct":  float(body.get("qty_pct", 1.0)),
-            "source":   body.get("source", "unknown"),
-            "strategy": body.get("strategy", ""),
+            **body,                                      # carry all action-specific fields (risk_pct, max_trade_pct, strategies, …)
+            "action":  action,                           # normalised to uppercase
+            "symbol":  body.get("symbol", cfg.SYMBOL),
+            "qty_pct": float(body.get("qty_pct", 1.0)),
+            "source":  body.get("source", "unknown"),
         }
         log("INSTRUCTION_SERVER", "INSTRUCTION_RECEIVED",
             instr_action=instruction["action"], source=instruction["source"],

@@ -175,9 +175,11 @@ def signal_engine(ind: dict, regime: str, override: str | None = None) -> str:
     long_bb = price <= bb_lo * 1.003 and rsi < 32 and ema_bull
 
     # Mean-reversion BUY: deeply oversold in bear trend — catch the bounce
-    # RSI < 28 (raised from 22): still rare but catches genuine capitulation bottoms
-    # Requires price at/below lower BB to confirm flush
-    bear_reversal = ema_bear and rsi < 28 and price <= bb_lo * 1.005
+    # RSI < 28: rare but catches genuine capitulation bottoms.
+    # H-6: require above-average volume to confirm the flush (avoids falling-knife entries
+    # on thin-volume drift; genuine capitulation bottoms spike volume as weak hands sell).
+    _vol_ratio = ind.get("volume_ratio", 1.0)
+    bear_reversal = ema_bear and rsi < 28 and price <= bb_lo * 1.005 and _vol_ratio >= 1.3
 
     # Trend-transition BUY: bear stack but MACD has gone bullish and price reclaimed EMA50.
     # Captures early reversals where EMA stack lags the actual price recovery.
@@ -581,16 +583,24 @@ async def main_loop():
                 instr = queue.get_nowait()
                 action = instr["action"]
                 if action == "RESUME":
-                    _prev_reason       = risk.halt_reason or "operator halt"
-                    risk.halt_flag     = False
-                    risk.halt_until    = 0
-                    risk.halt_reason   = ""
-                    risk.consec_losses = 0   # clear streak so same sequence doesn't re-halt immediately
-                    push_log(f"[INSTRUCTION] RESUME — trading resumed (was halted: {_prev_reason})")
-                    log("AGENT", "RESUMED", source=instr.get("source",""), prev_reason=_prev_reason)
-                    update_state(halt=False)
+                    # H-3: block RESUME from clearing a monthly drawdown halt — that requires
+                    # reviewing the loss and using RESET_DAY_START first.
+                    if risk.is_monthly_halt():
+                        push_log("[INSTRUCTION] RESUME rejected — monthly drawdown halt active. "
+                                 "Use RESET_DAY_START after reviewing losses, then RESUME.")
+                        log("AGENT", "RESUME_REJECTED_MONTHLY", reason=risk.halt_reason)
+                    else:
+                        _prev_reason       = risk.halt_reason or "operator halt"
+                        risk.halt_flag     = False
+                        risk.halt_until    = 0
+                        risk.halt_reason   = ""
+                        risk.consec_losses = 0
+                        push_log(f"[INSTRUCTION] RESUME — trading resumed (was halted: {_prev_reason})")
+                        log("AGENT", "RESUMED", source=instr.get("source",""), prev_reason=_prev_reason)
+                        update_state(halt=False)
                 elif action == "HALT":
                     await risk.emergency_halt(om, "operator_halt", equity, symbol=active_symbol)
+                    update_state(halt=True)
                 elif action == "CLOSE_ALL":
                     await om.cancel_all(symbol=active_symbol)
                     if em.positions:
@@ -734,6 +744,7 @@ async def main_loop():
 
             # ── Halt check ───────────────────────────────────────
             if risk.halt_active():
+                update_state(halt=True)
                 log("AGENT", "HALTED", msg="Waiting for halt to lift")
                 await _cycle_sleep()
                 continue
@@ -768,11 +779,12 @@ async def main_loop():
             _session_high = max(_session_high, current_price)
             _session_low  = min(_session_low,  current_price)
 
-            # FIX-7: Crossover strategies use closed-candle indicators (strip WS-patched live candle)
-            # to avoid phantom crossovers from intra-candle price noise.
-            _closed_indicators = (md.compute_indicators(candles.iloc[:-1])
-                                  if _strategy in ("ema_cross", "macd_cross")
-                                  else indicators)
+            # H-12: ALL strategies use closed-candle indicators for signal evaluation.
+            # The live candle is patched with the WS price in get_klines(), causing EMAs, RSI,
+            # and MACD to shift mid-bar — producing phantom crossovers and early signals.
+            # Stripping the live candle (iloc[:-1]) gives stable, committed signals on closed bars.
+            # `indicators` (live-candle) is kept for real-time position management (exit levels).
+            _closed_indicators = md.compute_indicators(candles.iloc[:-1])
 
             # EMA cross: persist closed-candle indicators for next cycle's crossover comparison
             _prev_indicators = dict(_closed_indicators)
@@ -860,6 +872,7 @@ async def main_loop():
                         warning="actual_fill_price_unknown")
 
             # ── Push chart data ───────────────────────────────────
+            _fc_slope_pct = 0.0   # neutral fallback — gates inactive if chart block fails
             try:
                 import pandas_ta as _ta
                 import math as _math
@@ -903,6 +916,7 @@ async def main_loop():
                 _ym  = sum(_ys) / _LR_WIN
                 _ss  = sum((x - _xm) ** 2 for x in _xs) or 1
                 _sl  = sum((_xs[i] - _xm) * (_ys[i] - _ym) for i in range(_LR_WIN)) / _ss
+                _fc_slope_pct = _sl / current_price * 100  # % per 15m bar — shared with trade gates
                 _int = _ym - _sl * _xm
                 _bar_secs = 900   # 15m candles
                 _last_ts  = ts_idx[-1]
@@ -934,23 +948,6 @@ async def main_loop():
                              forecast  = _fc)
             except Exception as ce:
                 log("AGENT", "CHART_ERROR", error=str(ce))
-
-            # ── Forecast slope (independent of chart block) ───────
-            # Linear regression on last 20 closed candles — slope used as
-            # a directional gate before BUY entries.
-            try:
-                _lr_c   = candles["close"]
-                _lr_n   = min(20, len(_lr_c) - 1)
-                _lr_xs  = list(range(_lr_n))
-                _lr_ys  = [float(_lr_c.iloc[-_lr_n + i]) for i in range(_lr_n)]
-                _lr_xm  = sum(_lr_xs) / _lr_n
-                _lr_ym  = sum(_lr_ys) / _lr_n
-                _lr_ss  = sum((x - _lr_xm) ** 2 for x in _lr_xs) or 1
-                _lr_sl  = sum((_lr_xs[i]-_lr_xm)*(_lr_ys[i]-_lr_ym)
-                              for i in range(_lr_n)) / _lr_ss
-                _fc_slope_pct = _lr_sl / current_price * 100  # % per 15m bar
-            except Exception:
-                _fc_slope_pct = 0.0  # neutral fallback — gate inactive
 
             # ── Sentiment: Fear & Greed ───────────────────────────
             fear_greed = await fg.fetch()
@@ -1031,42 +1028,51 @@ async def main_loop():
 
             # ── Module 5: Manage open positions ───────────────────
             exit_actions = em.manage_open_positions(current_price, indicators)
-            for act, trade_pnl in exit_actions:
+            # exit_actions is now list[tuple[str, float, float]] — (action, pnl, sell_qty)
+            for act, trade_pnl, _act_sell_qty in exit_actions:
                 _session_realized_pnl += trade_pnl
                 push_log(f"[EXIT] {act} @ {current_price:.4f}")
                 if act.startswith("CLOSE:"):
-                    # Full close — sell entire base asset balance on the exchange
-                    base_bal = await om.get_base_balance(active_symbol)
-                    if base_bal > 0:
-                        close_order = await om.submit("SELL", base_bal, tick, indicators,
+                    # C-1: position is marked pending_close in exit_manager; remove only after confirmed SELL.
+                    # C-3: cancel exchange stop before submitting market SELL to prevent double-sell.
+                    _pending_pos = [p for p in em.positions if p.pending_close]
+                    for _pp in _pending_pos:
+                        if _pp.exchange_stop_id > 0:
+                            asyncio.create_task(om.cancel_order(active_symbol, _pp.exchange_stop_id))
+                            _pp.exchange_stop_id = 0
+                    # H-15: use tracked sell_qty from exit_manager instead of querying live balance
+                    sell_qty = _act_sell_qty if _act_sell_qty > 0 else (await om.get_base_balance(active_symbol))
+                    if sell_qty > 0:
+                        close_order = await om.submit("SELL", sell_qty, tick, indicators,
                                                       symbol=active_symbol)
                         if close_order:
-                            # Fix-6 complete: check fill status — partial fill leaves orphaned coin
                             _ex_status = close_order.get("status", "FILLED")
                             if _ex_status == "PARTIALLY_FILLED":
                                 _ex_exec = float(close_order.get("executedQty", 0))
-                                _ex_rem  = base_bal - _ex_exec
+                                _ex_rem  = sell_qty - _ex_exec
+                                # C-1: on partial fill, reset pending_close and adjust qty so
+                                # the remainder is re-managed next cycle
+                                for _pp in _pending_pos:
+                                    _pp.pending_close = False
+                                    _pp.qty = _ex_rem
                                 if _ex_rem * current_price > 10:
-                                    # Re-add a synthetic position for the unsold remainder
-                                    _rem_pos = Position(
-                                        side="BUY", avg_entry=current_price, qty=_ex_rem,
-                                        stop=round(current_price - indicators["atr14"], 2),
-                                        tp1=round(current_price + indicators["atr14"] * cfg.TP1_R, 2),
-                                        tp2=round(current_price + indicators["atr14"] * cfg.TP2_R, 2),
-                                        tp3=round(current_price + indicators["atr14"] * cfg.TP3_R, 2),
-                                        initial_risk=round(_ex_rem * indicators["atr14"], 4),
-                                        symbol=active_symbol,
-                                    )
-                                    em.positions.append(_rem_pos)
-                                    push_log(f"[PARTIAL_FILL] Exit {_ex_exec:.6f}/{base_bal:.6f} sold — {_ex_rem:.6f} remaining, position re-tracked")
+                                    push_log(f"[PARTIAL_FILL] Exit {_ex_exec:.6f}/{sell_qty:.6f} sold — {_ex_rem:.6f} remaining, position retained")
+                                else:
+                                    em.positions = [p for p in em.positions if not p.pending_close]
                             else:
-                                push_log(f"[EXIT_EXECUTED] SELL {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
+                                # Full fill: clear pending positions
+                                em.positions = [p for p in em.positions if not p.pending_close]
+                                push_log(f"[EXIT_EXECUTED] SELL {active_symbol} qty={round(sell_qty,6)} @ ~{current_price:.4f}")
                                 asyncio.create_task(asyncio.to_thread(
-                                    _email.notify_fill, _agent_name, active_symbol, "SELL", base_bal, current_price))
+                                    _email.notify_fill, _agent_name, active_symbol, "SELL", sell_qty, current_price))
+                        else:
+                            # SELL submit failed — reset pending_close so position is re-managed
+                            for _pp in _pending_pos:
+                                _pp.pending_close = False
+                            push_log(f"[CLOSE_WARN] SELL submit failed — position retained, will retry next cycle")
                 elif act.startswith("PARTIAL_CLOSE:BUY:TP1"):
-                    base_bal = await om.get_base_balance(active_symbol)
-                    # NM-1: (1 - TP1_PCT + TP1_PCT) = 1 always — simplified to bare TP1_PCT
-                    sell_qty = base_bal * cfg.TP1_PCT
+                    # H-15: use tracked sold_qty from exit_manager (exact 33% of original)
+                    sell_qty = _act_sell_qty if _act_sell_qty > 0 else 0
                     if sell_qty > 0:
                         tp_order = await om.submit("SELL", sell_qty, tick, indicators,
                                                    symbol=active_symbol)
@@ -1074,13 +1080,10 @@ async def main_loop():
                             push_log(f"[TP1_EXECUTED] SELL {active_symbol} qty={round(sell_qty,6)} @ ~{current_price:.4f}")
                             asyncio.create_task(asyncio.to_thread(
                                 _email.notify_fill, _agent_name, active_symbol, "SELL (TP1)", sell_qty, current_price))
-                            # M-5: record partial-close P&L against the risk engine
                             risk.record_trade(trade_pnl, equity)
                 elif act.startswith("PARTIAL_CLOSE:BUY:TP2"):
-                    base_bal = await om.get_base_balance(active_symbol)
-                    # NC-1: after TP1, base_bal is (1-TP1_PCT) of original.
-                    # To sell TP2_PCT of original: fraction of current balance = TP2_PCT / (1 - TP1_PCT)
-                    sell_qty = base_bal * (cfg.TP2_PCT / (1 - cfg.TP1_PCT))
+                    # H-15: use tracked sold_qty from exit_manager
+                    sell_qty = _act_sell_qty if _act_sell_qty > 0 else 0
                     if sell_qty > 0:
                         tp_order = await om.submit("SELL", sell_qty, tick, indicators,
                                                    symbol=active_symbol)
@@ -1088,19 +1091,28 @@ async def main_loop():
                             push_log(f"[TP2_EXECUTED] SELL {active_symbol} qty={round(sell_qty,6)} @ ~{current_price:.4f}")
                             asyncio.create_task(asyncio.to_thread(
                                 _email.notify_fill, _agent_name, active_symbol, "SELL (TP2)", sell_qty, current_price))
-                            # M-5: record partial-close P&L against the risk engine
                             risk.record_trade(trade_pnl, equity)
                 elif act.startswith("PARTIAL_CLOSE:BUY:TP3"):
-                    # H-2: sell remaining position at TP3 (~34% of original after TP1+TP2)
-                    base_bal = await om.get_base_balance(active_symbol)
-                    if base_bal > 0:
-                        tp_order = await om.submit("SELL", base_bal, tick, indicators,
+                    # H-1: position is marked pending_close in exit_manager — clear after confirmed SELL
+                    _pending_pos = [p for p in em.positions if p.pending_close]
+                    for _pp in _pending_pos:
+                        if _pp.exchange_stop_id > 0:
+                            asyncio.create_task(om.cancel_order(active_symbol, _pp.exchange_stop_id))
+                            _pp.exchange_stop_id = 0
+                    sell_qty = _act_sell_qty if _act_sell_qty > 0 else 0
+                    if sell_qty > 0:
+                        tp_order = await om.submit("SELL", sell_qty, tick, indicators,
                                                    symbol=active_symbol)
                         if tp_order:
-                            push_log(f"[TP3_EXECUTED] SELL {active_symbol} qty={round(base_bal,6)} @ ~{current_price:.4f}")
+                            push_log(f"[TP3_EXECUTED] SELL {active_symbol} qty={round(sell_qty,6)} @ ~{current_price:.4f}")
                             asyncio.create_task(asyncio.to_thread(
-                                _email.notify_fill, _agent_name, active_symbol, "SELL (TP3)", base_bal, current_price))
+                                _email.notify_fill, _agent_name, active_symbol, "SELL (TP3)", sell_qty, current_price))
                             risk.record_trade(trade_pnl, equity)
+                            # H-1: remove zombie — clear pending_close positions after TP3 fill
+                            em.positions = [p for p in em.positions if not p.pending_close]
+                        else:
+                            for _pp in _pending_pos:
+                                _pp.pending_close = False
 
             # Update open position overlay
             if em.positions:
@@ -1116,31 +1128,27 @@ async def main_loop():
             else:
                 update_open_pos(None)
 
-            # ── Signal dispatch ───────────────────────────────────
+            # ── Signal dispatch — all strategies use closed-candle indicators ──
             if _strategy == "ema_cross":
-                # FIX-7: closed indicators avoid WS phantom crossovers mid-candle
-                # ADX filter: skip EMA cross in choppy markets (ADX<18 = no trend to ride)
-                _adx_ok = indicators.get("adx14", 20.0) >= 18.0
+                _adx_ok = _closed_indicators.get("adx14", 20.0) >= 18.0
                 signal = _ema_cross.signal_engine(_closed_indicators, _ema_prev,
                                                    override=pending_override)
                 if signal in ("BUY", "SELL") and not _adx_ok:
-                    push_log(f"[EMA_CROSS] ADX {indicators.get('adx14', 0):.1f} < 18 — cross filtered (choppy)")
+                    push_log(f"[EMA_CROSS] ADX {_closed_indicators.get('adx14', 0):.1f} < 18 — cross filtered (choppy)")
                     signal = "NONE"
             elif _strategy == "rsi_reversal":
-                signal = _rsi_rev.signal_engine(indicators, override=pending_override)
+                signal = _rsi_rev.signal_engine(_closed_indicators, override=pending_override)
             elif _strategy == "macd_cross":
                 signal = _macd_cross.signal_engine(_closed_indicators, _ema_prev,
                                                     override=pending_override)
             elif _strategy == "bb_breakout":
-                signal = _bb_break.signal_engine(indicators, override=pending_override)
+                signal = _bb_break.signal_engine(_closed_indicators, override=pending_override)
             else:  # "momentum" (default)
-                signal = signal_engine(indicators, regime, override=pending_override)
+                signal = signal_engine(_closed_indicators, regime, override=pending_override)
+            _was_override    = pending_override is not None
             pending_override = None
 
             # ── Secondary strategy consensus veto ─────────────────────────────
-            # Secondaries (_strategies[1:]) each independently evaluate. If any
-            # secondary returns the OPPOSITE direction, the primary signal is
-            # vetoed to NONE (prevents entering against a confirmed counter-signal).
             if signal in ("BUY", "SELL") and len(_strategies) > 1:
                 _opposite = "SELL" if signal == "BUY" else "BUY"
                 for _sec_strat in _strategies[1:]:
@@ -1148,13 +1156,13 @@ async def main_loop():
                     if _sec_strat == "ema_cross":
                         _sec_sig = _ema_cross.signal_engine(_closed_indicators, _ema_prev)
                     elif _sec_strat == "rsi_reversal":
-                        _sec_sig = _rsi_rev.signal_engine(indicators)
+                        _sec_sig = _rsi_rev.signal_engine(_closed_indicators)
                     elif _sec_strat == "macd_cross":
                         _sec_sig = _macd_cross.signal_engine(_closed_indicators, _ema_prev)
                     elif _sec_strat == "bb_breakout":
-                        _sec_sig = _bb_break.signal_engine(indicators)
+                        _sec_sig = _bb_break.signal_engine(_closed_indicators)
                     elif _sec_strat == "momentum":
-                        _sec_sig = signal_engine(indicators, regime)
+                        _sec_sig = signal_engine(_closed_indicators, regime)
                     if _sec_sig == _opposite:
                         push_log(f"[CONSENSUS] {_sec_strat.upper()} vetoed {signal} — "
                                  f"secondary says {_sec_sig}")
@@ -1162,30 +1170,28 @@ async def main_loop():
                         break
 
             # ── Neural network signal augmentation ───────────────────────────
-            # Skipped for crossover/mean-reversion strategies — signal is self-contained.
             _uses_nn = _strategy == "momentum"
             if not _uses_nn:
-                _nn_prob = 0.5  # neutral placeholder for dashboard display
+                _nn_prob = 0.5
                 update_state(nn_confidence=50.0)
             else:
-                # _nn_prob is computed once here and reused throughout the rest of the
-                # cycle (BUY initiation, SELL initiation, and the confirmation gate).
                 _nn_prob = predictor.predict(candles)
                 update_state(nn_confidence=round(_nn_prob * 100, 1))
-                NN_BUY_THRESHOLD  = 0.70   # initiates a BUY even when rule engine says NONE
-                NN_SELL_THRESHOLD = 0.30   # triggers protective exit on an open position
+                NN_BUY_THRESHOLD  = 0.70
+                NN_SELL_THRESHOLD = 0.30
 
-                # Promote NONE → BUY when NN is highly confident of an up-move in TRENDING
+                # H-7: NN-initiated BUY requires RSI not overbought — avoids chasing momentum tops.
+                # All standard entry gates still apply after this promotion.
                 if (signal == "NONE"
                         and not em.positions
                         and regime == "TRENDING"
-                        and _nn_prob >= NN_BUY_THRESHOLD):
+                        and _nn_prob >= NN_BUY_THRESHOLD
+                        and _closed_indicators.get("rsi14", 100) < 75):
                     push_log(f"[NN] {active_symbol} up={_nn_prob:.1%} in TRENDING "
                              f"— initiating BUY (subject to all gates)")
                     log("NN", "BUY_INITIATED", symbol=active_symbol, prob=round(_nn_prob, 3))
                     signal = "BUY"
 
-                # Trigger early exit when NN strongly predicts a down-move on open position
                 if (signal != "SELL"
                         and em.positions
                         and _nn_prob <= NN_SELL_THRESHOLD):
@@ -1227,6 +1233,8 @@ async def main_loop():
             _should_rotate = (_sell_no_pos
                               or none_signal_streak >= NONE_SIGNAL_ROTATE)
             if _can_rotate and _should_rotate:
+                # H-10: re-query pool at rotation time so we don't race to the same coin as a
+                # sibling slot that just registered its new coin in the same cycle.
                 _rot_excl = _ep.get_other_symbols(_agent_slot) | {"BTCUSDT"}
                 _rot_next = [r["symbol"] for r in scanner.ranked[:8]
                              if r["symbol"] not in _rot_excl and r["symbol"] != active_symbol]
@@ -1252,14 +1260,34 @@ async def main_loop():
                     await _cycle_sleep()
                     continue
 
-            # Manual SELL override — close the open position immediately
+            # Shared forecast threshold used by both BUY and SELL gates below.
+            _FC_SLOPE_THRESHOLD = 0.01   # % per 15m bar
+
+            # Forecast gate for SELL: if the linear regression slope is clearly
+            # upward the position is still in an uptrend — suppress the SELL so
+            # it continues riding.  Manual dashboard overrides bypass this gate.
+            if (signal == "SELL"
+                    and em.positions
+                    and not _was_override
+                    and _fc_slope_pct > _FC_SLOPE_THRESHOLD):
+                push_log(f"[SKIP] {active_symbol} forecast slope {_fc_slope_pct:+.3f}%/bar "
+                         f"(uptrend) — SELL blocked by regression gate")
+                log("AGENT", "GATE_BLOCK_FORECAST_SELL", symbol=active_symbol,
+                    slope_pct=round(_fc_slope_pct, 4), threshold=_FC_SLOPE_THRESHOLD)
+                signal = "NONE"
+
+            # Strategy-driven SELL — close the open position
             if signal == "SELL" and em.positions:
+                # C-3: cancel exchange stop before market SELL to prevent double-fill
+                for _sp in em.positions:
+                    if _sp.exchange_stop_id > 0:
+                        asyncio.create_task(om.cancel_order(active_symbol, _sp.exchange_stop_id))
+                        _sp.exchange_stop_id = 0
                 base_bal = await om.get_base_balance(active_symbol)
                 if base_bal > 0:
                     close_order = await om.submit("SELL", base_bal, tick, indicators,
                                                   symbol=active_symbol)
                     if close_order:
-                        # FIX-6: check fill status before clearing positions (partial fills = ghost positions)
                         _fill_status = close_order.get("status", "FILLED")
                         if _fill_status == "FILLED":
                             em.positions.clear()
@@ -1308,15 +1336,18 @@ async def main_loop():
             # Only fires when exit_actions is non-empty (a close/TP actually happened),
             # not on every idle cycle — avoids spurious halts from transient API pricing
             # failures that make equity appear low when no trade occurred.
-            _full_close_pnl  = sum(pnl for act, pnl in exit_actions if act.startswith("CLOSE:"))
-            _had_full_close  = any(act.startswith("CLOSE:") for act, _ in exit_actions)
+            # C-2: unpack 3-element tuples; om.get_equity() does not exist — use get_balances_raw()
+            _full_close_pnl  = sum(pnl for act, pnl, _ in exit_actions if act.startswith("CLOSE:"))
+            _had_full_close  = any(act.startswith("CLOSE:") for act, _, _ in exit_actions)
             _post_close_equity_fetched = False
             if exit_actions and not em.positions:
                 try:
-                    _post_close_equity = await om.get_equity(symbol=active_symbol, price=current_price)
+                    _pc_raw = await om.get_balances_raw(active_symbol)
+                    _post_close_equity = _pc_raw[0] + _pc_raw[1] * current_price
                     risk.update_metrics(_post_close_equity)
                     _post_close_equity_fetched = True
-                    # Fix-2 gap: call record_trade for every full close including breakeven (pnl==0)
+                    # C-2: record_trade for every full close (stop-out and time-exit) so
+                    # consecutive-loss halt and daily-DD metrics are correctly updated
                     if _had_full_close:
                         risk.record_trade(_full_close_pnl, _post_close_equity)
                 except Exception as _eq_err:
@@ -1343,27 +1374,30 @@ async def main_loop():
                     push_log(f"[COOLDOWN] {active_symbol} — {_wait}m left before re-entry allowed")
                     signal = "NONE"
 
-            # FIX-14: BTC session range guard (was 24h rolling which extends into yesterday).
-            # On low-volatility sessions (BTC session range < 1.5%), 15m trades cannot
-            # consistently beat the 0.15% fee threshold.
+            # BTC range guard: block entries when BTC is too flat to cover fees.
+            # Uses the LARGER of the session range (high/low since agent start) and the
+            # 24h ticker range so a restart mid-day doesn't artificially zero out the range.
             if signal == "BUY" and not em.positions and active_symbol == "BTCUSDT":
                 _BTC_MIN_DAILY_RANGE = 0.015   # 1.5%
-                if _session_open_price > 0 and _session_low < float("inf"):
-                    # Use session range once we have enough price history
-                    _btc_session_range = (_session_high - _session_low) / _session_open_price
-                else:
-                    # Fallback to 24h ticker on very first cycle before session range builds
-                    _btc_h = tick.get("high", current_price)
-                    _btc_l = tick.get("low",  current_price)
-                    _btc_session_range = (_btc_h - _btc_l) / _btc_l if _btc_l > 0 else 1.0
-                if _btc_session_range < _BTC_MIN_DAILY_RANGE:
+                _btc_h24 = tick.get("high", current_price)
+                _btc_l24 = tick.get("low",  current_price)
+                _btc_ticker_range  = (_btc_h24 - _btc_l24) / _btc_l24 if _btc_l24 > 0 else 1.0
+                _btc_session_range = (
+                    (_session_high - _session_low) / _session_open_price
+                    if _session_open_price > 0 and _session_low < float("inf")
+                    else 0.0
+                )
+                _btc_range = max(_btc_ticker_range, _btc_session_range)
+                if _btc_range < _BTC_MIN_DAILY_RANGE:
                     push_log(
-                        f"[SKIP] BTCUSDT session range {_btc_session_range:.2%} "
-                        f"< {_BTC_MIN_DAILY_RANGE:.1%} minimum — "
-                        f"flat market, fees would consume profit"
+                        f"[SKIP] BTCUSDT range {_btc_range:.2%} "
+                        f"(24h={_btc_ticker_range:.2%} session={_btc_session_range:.2%}) "
+                        f"< {_BTC_MIN_DAILY_RANGE:.1%} minimum — flat market, fees would consume profit"
                     )
                     log("AGENT", "GATE_BLOCK_BTC_FLAT",
-                        session_range_pct=round(_btc_session_range * 100, 3),
+                        range_pct=round(_btc_range * 100, 3),
+                        ticker_24h_pct=round(_btc_ticker_range * 100, 3),
+                        session_pct=round(_btc_session_range * 100, 3),
                         min_pct=_BTC_MIN_DAILY_RANGE * 100)
                     signal = "NONE"
 
@@ -1423,7 +1457,6 @@ async def main_loop():
                 # A downward-sloping regression means recent price action is trending lower —
                 # entering a BUY against it would be fighting the short-term trend.
                 # Threshold: 0.01%/bar filters noise on flat markets; near-zero slope = neutral = allow.
-                _FC_SLOPE_THRESHOLD = 0.01   # % per 15m bar
                 if signal == "BUY" and _fc_slope_pct < -_FC_SLOPE_THRESHOLD:
                     push_log(f"[SKIP] {active_symbol} forecast slope {_fc_slope_pct:+.3f}%/bar "
                              f"(downtrend) — BUY blocked by regression gate")
@@ -1499,6 +1532,21 @@ async def main_loop():
                             _email.notify_fill, _agent_name, active_symbol, "BUY", qty, current_price))
                         pos = em.attach_exits(order, indicators, symbol=active_symbol)
                         if pos:
+                            # C-3: place exchange-side stop order immediately after BUY fill.
+                            # This acts as a safety net if the agent process crashes — the stop
+                            # executes on the exchange even without a running agent.
+                            try:
+                                _stop_oid = await om.place_stop_limit(active_symbol, pos.qty, pos.stop)
+                                if _stop_oid:
+                                    pos.exchange_stop_id = _stop_oid
+                                    push_log(f"[STOP_ORDER] Exchange stop placed: {active_symbol} "
+                                             f"stop=${pos.stop:.4f} orderId={_stop_oid}")
+                                    log("AGENT", "EXCHANGE_STOP_PLACED", symbol=active_symbol,
+                                        stop=round(pos.stop, 4), orderId=_stop_oid)
+                                else:
+                                    push_log(f"[STOP_ORDER] Exchange stop placement failed — software stop active only")
+                            except Exception as _stop_e:
+                                log("AGENT", "EXCHANGE_STOP_ERROR", error=str(_stop_e)[:80])
                             push_transaction({
                                 "side":   "BUY",
                                 "symbol": active_symbol,
@@ -1655,10 +1703,12 @@ async def main_loop():
                     f"| signal={signal} | regime={regime} | equity={round(equity,2)}"
                 )
 
-            # Cache pool values for next cycle's heartbeat at top of loop
+            # Update pool immediately so portfolio_tracker total stays in sync with usdt_free.
+            # The top-of-loop report uses last cycle's value; this ensures the pool reflects
+            # any position open/close that happened this cycle before the next 30s USDT refresh.
             _pool_open_usdt = sum(p.qty * current_price for p in em.positions)
-            # slot_pnl = unrealized P&L on THIS slot's open coin position only
             _pool_pnl = sum(p.qty * current_price - p.qty * p.avg_entry for p in em.positions)
+            _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
 
             # ── Persist positions after every cycle ───────────────────────────
             if em.positions:

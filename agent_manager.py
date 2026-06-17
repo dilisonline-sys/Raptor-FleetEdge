@@ -965,10 +965,17 @@ class AgentManager:
     async def _list(self, _):
         # Re-sync from state file on every list call — picks up PIDs updated externally
         _load_state()
-        result = []
-        for name, info in list(_agents.items()):
-            status = _agent_status(name)
-            result.append({**info, "status": status, "name": name})
+        # Prune agents whose process has died (crash, external kill, etc.)
+        dead = [n for n, info in list(_agents.items())
+                if not _pid_alive(info.get("pid", 0))]
+        if dead:
+            for n in dead:
+                _agents.pop(n, None)
+            _save_state()
+        result = [
+            {**info, "status": "running", "name": name}
+            for name, info in list(_agents.items())
+        ]
         return web.json_response(result)
 
     async def _coins(self, _):

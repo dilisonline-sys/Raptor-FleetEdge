@@ -1,5 +1,6 @@
 """Module 6 & 7 — Risk Metrics and Kill Switch."""
 import asyncio
+import datetime
 import time
 import aiohttp
 from logger import log
@@ -16,6 +17,7 @@ class RiskEngine:
         self.consec_losses     = 0
         self.trade_history: list[dict] = []
         self._session: aiohttp.ClientSession | None = None
+        self._last_reset_date: datetime.date | None = None  # H-2: track last daily reset
 
     def halt_active(self) -> bool:
         if self.halt_flag and time.time() < self.halt_until:
@@ -56,22 +58,38 @@ class RiskEngine:
         if self.consec_losses >= cfg.MAX_CONSEC_LOSS:
             self._set_halt(4, f"{cfg.MAX_CONSEC_LOSS} consecutive losses", equity)
 
+    def _check_daily_reset(self, current_equity: float):
+        """H-2: Reset day_start_equity at calendar midnight so DD limit is per-day not per-session."""
+        today = datetime.date.today()
+        if self._last_reset_date is None:
+            self._last_reset_date = today
+            return
+        if today > self._last_reset_date:
+            self._last_reset_date  = today
+            self.day_start_equity  = current_equity
+            log("MODULE_6", "DAY_START_RESET",
+                new_equity=round(current_equity, 2), date=str(today))
+
     def update_metrics(self, current_equity: float):
         if self.day_start_equity is None:
             self.day_start_equity   = current_equity
         if self.month_start_equity is None:
             self.month_start_equity = current_equity
 
-        # Sanity guard: reject implausibly low equity values (< 30% of day_start)
+        # H-2: reset daily baseline at midnight
+        self._check_daily_reset(current_equity)
+
+        # Sanity guard: reject implausibly low equity values (< 40% of day_start)
         # that indicate a transient API pricing failure (e.g. BTC price returned as 0).
-        # Such glitches should not trigger protective halts.
+        # Threshold raised from 30% to 40% to catch more realistic API glitches
+        # while still allowing catastrophic real losses to trigger halt.
         if (self.day_start_equity and self.day_start_equity > 0
-                and current_equity < self.day_start_equity * 0.30):
+                and current_equity < self.day_start_equity * 0.40):
             log("MODULE_6", "EQUITY_SANITY_SKIP",
                 current=round(current_equity, 2),
                 day_start=round(self.day_start_equity, 2),
                 ratio=round(current_equity / self.day_start_equity, 3),
-                msg="equity too low vs day_start — likely API pricing glitch, skipping DD check")
+                msg="equity < 40% of day_start — likely API pricing glitch, skipping DD check")
             return
 
         daily_dd   = ((self.day_start_equity - current_equity) / self.day_start_equity
@@ -94,6 +112,10 @@ class RiskEngine:
             daily_dd=round(daily_dd * 100, 2),
             monthly_dd=round(monthly_dd * 100, 2),
             consec_losses=self.consec_losses)
+
+    def is_monthly_halt(self) -> bool:
+        """H-3: returns True when the current halt is a monthly drawdown halt."""
+        return self.halt_flag and "monthly drawdown" in (self.halt_reason or "")
 
     async def emergency_halt(self, om, reason: str, equity: float, symbol: str | None = None):
         log("MODULE_7", "EMERGENCY_HALT", reason=reason, equity=round(equity, 2))

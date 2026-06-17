@@ -1,4 +1,5 @@
 """Module 2 — Position Sizing."""
+import math
 from logger import log
 import config as cfg
 
@@ -20,14 +21,18 @@ class PositionSizer:
             log("MODULE_2", "SIZING_ABORT", reason="stop_distance <= 0")
             return None
 
+        # H-13: guard against NaN stop_distance propagated from invalid ATR
+        if math.isnan(stop_distance):
+            log("MODULE_2", "SIZING_ABORT", reason="stop_distance is NaN (ATR invalid)")
+            return None
+
         base_qty = risk_amount / stop_distance
 
-        # Volatility adjustment
+        # Volatility adjustment — S-4: the >4% branch is unreachable because the
+        # entry gate blocks at MAX_ENTRY_ATR_PCT=3%. Removed to avoid dead code confusion.
         vol_ratio = stop_distance / entry_price
-        if vol_ratio > 0.04:
-            vol_mult = 0.5
-        elif vol_ratio > 0.025:
-            vol_mult = 0.75
+        if vol_ratio > 0.025:
+            vol_mult = 0.75   # 2.5-3% ATR: slightly elevated volatility, moderate size
         else:
             vol_mult = 1.0
 

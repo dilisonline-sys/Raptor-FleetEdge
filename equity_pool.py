@@ -3,6 +3,7 @@ Each agent registers its slot (0-3), reports its open position value each cycle,
 reads other slots' symbols to avoid trading the same coin simultaneously.
 Uses fcntl file locking for safe concurrent multi-process access.
 """
+import contextlib
 import fcntl
 import json
 import os
@@ -14,28 +15,23 @@ POOL_FILE = Path("/tmp/rfe_equity_pool.json")
 SLOT_TTL  = 90  # seconds without heartbeat → slot treated as dead
 
 
-def _read() -> dict:
+@contextlib.contextmanager
+def _locked_file(mode: str, lock_type: int):
+    """Open POOL_FILE with an fcntl lock and yield the file object.
+    H-11: exclusive lock (LOCK_EX) for all writes so read-modify-write is atomic."""
     try:
-        with open(POOL_FILE, "r") as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
+        with open(POOL_FILE, mode) as f:
+            fcntl.flock(f, lock_type)
             try:
-                return json.load(f)
+                yield f
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
-    except Exception:
-        # FIX-17: default to FLEET_SIZE slots (5) so slot 4 (EMA cross) has a budget entry
-        return {"slots": {str(i): None for i in range(cfg.FLEET_SIZE)}, "ts": 0, "usdt_free": 0.0}
+    except FileNotFoundError:
+        yield None
 
 
-def _write(state: dict):
-    # C-3: write to a temp file then atomically replace — prevents concurrent readers
-    # seeing a truncated pool file between open("w") and the first json.dump byte.
-    try:
-        _tmp = POOL_FILE.with_suffix(".tmp")
-        _tmp.write_text(json.dumps(state, indent=2))
-        _tmp.replace(POOL_FILE)   # atomic on Linux (same filesystem)
-    except Exception:
-        pass
+def _default_state() -> dict:
+    return {"slots": {str(i): None for i in range(cfg.FLEET_SIZE)}, "ts": 0, "usdt_free": 0.0}
 
 
 def _live(state: dict) -> dict:
@@ -47,52 +43,118 @@ def _live(state: dict) -> dict:
     return state
 
 
+def _read_locked(f) -> dict:
+    """Read state from an already-open, already-locked file handle."""
+    if f is None:
+        return _default_state()
+    try:
+        f.seek(0)
+        return json.load(f)
+    except Exception:
+        return _default_state()
+
+
+def _write_locked(f, state: dict):
+    """Write state to an already-open, already-locked file handle (truncate + rewrite)."""
+    if f is None:
+        return
+    try:
+        f.seek(0)
+        f.truncate()
+        json.dump(state, f, indent=2)
+        f.flush()
+    except Exception:
+        pass
+
+
+def _read() -> dict:
+    """Read-only access (shared lock) — for callers that don't modify state."""
+    try:
+        with open(POOL_FILE, "r") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            try:
+                return json.load(f)
+            except Exception:
+                return _default_state()
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except Exception:
+        return _default_state()
+
+
+def _modify(fn):
+    """H-11: atomic read-modify-write under an exclusive lock.
+    fn receives the current state dict and must return the modified state dict."""
+    # Ensure file exists before opening in r+ mode
+    if not POOL_FILE.exists():
+        POOL_FILE.write_text(json.dumps(_default_state(), indent=2))
+    try:
+        with open(POOL_FILE, "r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                try:
+                    state = json.load(f)
+                except Exception:
+                    state = _default_state()
+                state = _live(state)
+                state = fn(state)
+                f.seek(0)
+                f.truncate()
+                json.dump(state, f, indent=2)
+                f.flush()
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
 def register(slot: int, symbol: str, pid: int, port: int):
     """Announce this agent's existence in the pool at startup."""
-    state = _live(_read())
-    state["slots"][str(slot)] = {
-        "symbol": symbol, "open_usdt": 0.0, "daily_pnl": 0.0,
-        "ts": time.time(), "pid": pid, "port": port,
-    }
-    _write(state)
+    def _fn(state):
+        state["slots"][str(slot)] = {
+            "symbol": symbol, "open_usdt": 0.0, "daily_pnl": 0.0,
+            "ts": time.time(), "pid": pid, "port": port,
+        }
+        return state
+    _modify(_fn)
 
 
 def report(slot: int, symbol: str, open_usdt: float, daily_pnl: float, *,
            usdt_free: float | None = None):
-    """Update this slot's live state. Called each cycle by the agent.
-
-    daily_pnl is stored as both 'daily_pnl' (backward compat) and 'slot_pnl'
-    (slot's own unrealized P&L on its open coin position only).
-    """
-    state = _live(_read())
-    s = state["slots"].get(str(slot)) or {}
-    s.update({"symbol": symbol, "open_usdt": open_usdt,
-               "daily_pnl": daily_pnl, "slot_pnl": daily_pnl, "ts": time.time()})
-    state["slots"][str(slot)] = s
-    if usdt_free is not None:
-        state["usdt_free"] = usdt_free
-    _write(state)
+    """Update this slot's live state. Called each cycle by the agent."""
+    def _fn(state):
+        s = state["slots"].get(str(slot)) or {}
+        s.update({"symbol": symbol, "open_usdt": open_usdt,
+                   "daily_pnl": daily_pnl, "slot_pnl": daily_pnl, "ts": time.time()})
+        state["slots"][str(slot)] = s
+        if usdt_free is not None:
+            state["usdt_free"] = usdt_free
+        return state
+    _modify(_fn)
 
 
 def report_usdt(raw_usdt: float):
     """Update only the top-level usdt_free field in the pool (called by background equity pusher)."""
-    state = _live(_read())
-    state["usdt_free"] = raw_usdt
-    _write(state)
+    def _fn(state):
+        state["usdt_free"] = raw_usdt
+        return state
+    _modify(_fn)
 
 
 def report_earn(earn_value: float):
     """Update Simple Earn total in the pool (called by slot 0's equity pusher every 5 min)."""
-    state = _live(_read())
-    state["earn_value"] = earn_value
-    _write(state)
+    def _fn(state):
+        state["earn_value"] = earn_value
+        return state
+    _modify(_fn)
 
 
 def deregister(slot: int):
     """Remove this slot from the pool on clean shutdown."""
-    state = _live(_read())
-    state["slots"][str(slot)] = None
-    _write(state)
+    def _fn(state):
+        state["slots"][str(slot)] = None
+        return state
+    _modify(_fn)
 
 
 def get_state() -> dict:
@@ -138,7 +200,6 @@ def get_budget(slot: int, total_equity: float) -> float:
 
     # When the per-slot share is below the Binance minimum order ($10), fall
     # back to the full pool headroom so a lone active agent can still trade.
-    # pool_cap already accounts for other slots' open exposure, so this is safe.
     MIN_TRADEABLE = 10.0
     if per_agent_cap < MIN_TRADEABLE:
         return max(0.0, min(pool_cap, total_equity * cfg.MAX_TRADE_PCT))
