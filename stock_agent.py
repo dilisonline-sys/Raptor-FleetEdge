@@ -25,6 +25,11 @@ STOCK_AGENT_PORT  = int(os.environ.get("AGENT_PORT", 7431))
 SCAN_INTERVAL_SEC = 30   # how often to check prices
 _agent_name       = os.environ.get("AGENT_NAME", "stock_agent")
 
+# BNB is excluded: Binance uses BNB internally for fee discounts.
+# Selling BNB can disable the fee discount and cause unexpected fee increases.
+EXCLUDED_ASSETS   = {"BNB"}
+EXCLUDED_SYMBOLS  = {"BNBUSDT"}
+
 # ── State ─────────────────────────────────────────────────────────────────────
 _sse_clients: list[web.StreamResponse] = []
 _log_buffer:  list[str] = []
@@ -184,8 +189,10 @@ async def _scan_once(om: _om_mod.OrderManager, http: aiohttp.ClientSession):
         already_parked = set(parked.keys())
 
         for coin in held:
+            if coin["asset"] in EXCLUDED_ASSETS:
+                continue
             sym = coin["asset"] + "USDT"
-            if sym in managed_symbols or sym in already_parked:
+            if sym in EXCLUDED_SYMBOLS or sym in managed_symbols or sym in already_parked:
                 continue
             # Unmanaged coin — auto-park at current price
             _pc.park(sym, coin["qty"], coin["price"], slot=-1)
@@ -220,24 +227,33 @@ async def _scan_once(om: _om_mod.OrderManager, http: aiohttp.ClientSession):
     _ep.report_parked_usdt(parked_usdt)
     _ep.set_parked_symbols(list(parked.keys()))
 
-    # Check each coin for recovery target ─────────────────────────────────────
+    # Check each coin for recovery target; log watching status for all ─────────
+    ready_to_sell: list[tuple[str, float, float]] = []  # (sym, qty, price)
     for sym, entry in list(parked.items()):
+        if sym in EXCLUDED_SYMBOLS:
+            continue
         price = prices.get(sym)
         if price is None:
             continue
         target = entry["target_price"]
-        push_log(f"[WATCH] {sym} price={price:.4f} target={target:.4f} ({((price/target)-1)*100:+.2f}%)")
+        pct_to_target = (price / target - 1) * 100
+        push_log(f"[WATCH] {sym} price={price:.4f} target={target:.4f} ({pct_to_target:+.2f}%)")
         if price >= target:
-            qty = entry["qty"]
-            push_log(f"[SELL_TRIGGER] {sym} reached target {target:.4f} — selling {qty:.6f}")
-            log("STOCK_AGENT", "SELL_TRIGGER", symbol=sym, qty=round(qty, 6),
+            ready_to_sell.append((sym, entry["qty"], price))
+            log("STOCK_AGENT", "SELL_TRIGGER", symbol=sym, qty=round(entry["qty"], 6),
                 price=round(price, 4), target=round(target, 4))
+
+    # Fire all sell orders in parallel so multiple coins exit simultaneously ───
+    if ready_to_sell:
+        push_log(f"[SELL_BATCH] {len(ready_to_sell)} coin(s) reached target — selling in parallel: "
+                 f"{[s for s,*_ in ready_to_sell]}")
+
+        async def _sell_one(sym: str, qty: float, price: float):
+            tick = {"bid": price * 0.9995, "ask": price * 1.0005,
+                    "price": price, "volume_24h": 1e9}
+            ind  = {"atr14": price * 0.01, "rsi14": 50.0,
+                    "ema20": price, "ema50": price}
             try:
-                # Build minimal tick/indicator dicts required by om.submit
-                tick = {"bid": price * 0.9995, "ask": price * 1.0005,
-                        "price": price, "volume_24h": 1e9}
-                ind  = {"atr14": price * 0.01, "rsi14": 50.0,
-                        "ema20": price, "ema50": price}
                 sold = await om.submit("SELL", qty, tick, ind, symbol=sym)
                 if sold:
                     _pc.unpark(sym)
@@ -249,6 +265,8 @@ async def _scan_once(om: _om_mod.OrderManager, http: aiohttp.ClientSession):
             except Exception as sell_err:
                 push_log(f"[SELL_ERR] {sym}: {sell_err}")
                 log("STOCK_AGENT", "SELL_ERROR", symbol=sym, error=str(sell_err)[:120])
+
+        await asyncio.gather(*[_sell_one(s, q, p) for s, q, p in ready_to_sell])
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
