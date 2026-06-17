@@ -160,6 +160,16 @@ def deregister(slot: int):
     _modify(_fn)
 
 
+def report_wallet_total(value: float):
+    """Report the true total wallet value (all Binance balances at current prices, excl. LD earn).
+    Written by slot 0 every 30s. Used by portfolio_tracker as the authoritative portfolio base."""
+    def _fn(state):
+        state["wallet_total"] = round(value, 4)
+        state["wallet_total_ts"] = time.time()
+        return state
+    _modify(_fn)
+
+
 def report_parked_usdt(value: float):
     """Update the total USDT value of parked coins (written by stock agent each scan)."""
     def _fn(state):

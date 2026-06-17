@@ -707,11 +707,18 @@ function renderFleet(pool) {
   Object.values(slots).forEach(s => {
     if (s) { totalOpen += s.open_usdt||0; totalPnl += s.daily_pnl||0; activeCount++; }
   });
+  // wallet_total (reported by slot 0) = true portfolio value including all coins.
+  // Falls back to sum of open positions when slot 0 hasn't reported yet.
+  const walletTotal = pool.wallet_total || 0;
+  const earnValue   = pool.earn_value   || 0;
+  const portfolioDisplay = walletTotal > 0
+    ? '$' + (walletTotal + earnValue).toFixed(2) + ' portfolio'
+    : '$' + totalOpen.toFixed(2) + ' open positions';
 
   const eqEl = document.getElementById('fleet-eq');
   const ddEl = document.getElementById('fleet-dd');
   if (activeCount > 0) {
-    eqEl.textContent = 'Open: $' + totalOpen.toFixed(2) + '  ·  ' + activeCount + ' agent' + (activeCount>1?'s':'') + ' running';
+    eqEl.textContent = portfolioDisplay + '  ·  ' + activeCount + ' agent' + (activeCount>1?'s':'') + ' running';
     ddEl.textContent = 'Daily P&L: ' + (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
     ddEl.style.color  = totalPnl >= 0 ? '#00e676' : '#ff1744';
   } else {
@@ -1145,8 +1152,12 @@ class AgentManager:
 
     async def _pool(self, _) -> web.Response:
         import json as _j
+        # Always read from the live mode-specific pool file — the fleet panel only shows live agents.
+        # The old POOL_FILE constant pointed to a legacy path that is never written after the
+        # mode-specific fix, which caused the fleet panel to show zero/stale values permanently.
+        pool_path = Path("/tmp/rfe_equity_pool_live.json")
         try:
-            with open(POOL_FILE) as f:
+            with open(pool_path) as f:
                 data = _j.load(f)
             # Enrich with agent port/name from _agents
             for name, info in _agents.items():
@@ -1415,7 +1426,7 @@ class AgentManager:
 
     async def _get_pool_data(self) -> dict:
         try:
-            with open(POOL_FILE) as f:
+            with open(Path("/tmp/rfe_equity_pool_live.json")) as f:
                 data = json.load(f)
             return data.get("slots", {})
         except Exception:
