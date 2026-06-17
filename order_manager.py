@@ -143,34 +143,77 @@ class OrderManager:
                         usdt += bal * cached
             return usdt, bals.get(base, 0.0), raw_usdt
 
+    # Stablecoins to skip when iterating balances — they are USDT-equivalent, not tradeable positions
+    _STABLECOINS = frozenset({"USDT", "USDC", "BUSD", "TUSD", "FDUSD", "USDP", "DAI", "USD1"})
+
     async def get_all_significant_balances(self, min_usdt_value: float = 5.0) -> list[dict]:
-        """Returns all coin holdings worth > min_usdt_value as [{asset, qty, usdt_value}].
-        Used by orphan recovery to find unmanaged positions across all coins.
+        """Returns all spot coin holdings worth >= min_usdt_value as [{asset, qty, usdt_value, price}].
+
+        Uses two API calls total:
+          1. GET /api/v3/account — authenticated, returns all balances
+          2. GET /api/v3/ticker/price — public, returns ALL ~2000 pair prices in one shot
+
+        The previous implementation made one individual price call per asset sequentially,
+        meaning most coins were silently dropped when requests failed or timed out.
         """
         await self._ensure_session()
+
+        # 1. Fetch all account balances (authenticated)
         params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
         params["signature"] = _sign(params)
-        async with self._session.get(cfg.SPOT_BASE_URL + "/api/v3/account", params=params) as r:
+        async with self._session.get(
+            cfg.SPOT_BASE_URL + "/api/v3/account",
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
             r.raise_for_status()
             data = await r.json()
-            bals = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in data["balances"]}
+
+        # Skip stablecoins, LD-prefixed earn tokens, and dust
+        bals: dict[str, float] = {}
+        for b in data.get("balances", []):
+            asset = b["asset"]
+            if asset in self._STABLECOINS or asset.startswith("LD"):
+                continue
+            qty = float(b["free"]) + float(b["locked"])
+            if qty >= 1e-8:
+                bals[asset] = qty
+
+        if not bals:
+            return []
+
+        # 2. Batch-fetch ALL live prices in a single public call
+        all_prices: dict[str, float] = {}
+        try:
+            async with self._session.get(
+                cfg.PUBLIC_DATA_URL + "/api/v3/ticker/price",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as rp:
+                rp.raise_for_status()
+                for item in await rp.json():
+                    sym = item.get("symbol", "")
+                    if sym.endswith("USDT"):
+                        try:
+                            all_prices[sym] = float(item["price"])
+                        except (ValueError, KeyError):
+                            pass
+        except Exception as e:
+            log("ORDER_MANAGER", "BATCH_PRICE_FETCH_FAILED", error=str(e)[:120])
+            return []
+
+        # 3. Match each held asset against the price map
         result = []
         for asset, qty in bals.items():
-            if asset == "USDT" or qty < 1e-8:
+            sym = asset + "USDT"
+            price = all_prices.get(sym, 0.0)
+            if price <= 0:
                 continue
-            try:
-                async with self._session.get(
-                    cfg.PUBLIC_DATA_URL + "/api/v3/ticker/price",
-                    params={"symbol": asset + "USDT"}
-                ) as rp:
-                    coin_price = float((await rp.json()).get("price", 0))
-                if coin_price > 0:
-                    usdt_val = qty * coin_price
-                    if usdt_val >= min_usdt_value:
-                        result.append({"asset": asset, "qty": qty,
-                                       "usdt_value": usdt_val, "price": coin_price})
-            except Exception:
-                pass
+            usdt_val = qty * price
+            if usdt_val >= min_usdt_value:
+                self._price_cache[asset] = price
+                result.append({"asset": asset, "qty": qty,
+                                "usdt_value": round(usdt_val, 4), "price": price})
+
         return result
 
     # Maps Binance Simple Earn LD-prefixed tokens to their underlying asset symbol
