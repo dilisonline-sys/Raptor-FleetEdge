@@ -29,59 +29,49 @@ def get_portfolio_state() -> dict:
     except Exception:
         pass
 
-    slots        = pool.get("slots", {})
-    usdt_free    = pool.get("usdt_free", 0.0)
-    earn_value   = pool.get("earn_value", 0.0)
-    parked_value = pool.get("parked_usdt", 0.0)
-    coin_value   = sum(
+    slots             = pool.get("slots", {})
+    usdt_free         = pool.get("usdt_free", 0.0)
+    earn_value        = pool.get("earn_value", 0.0)
+    parked_value      = pool.get("parked_usdt", 0.0)
+    other_coins_usdt  = pool.get("other_coins_usdt", 0.0)
+    coin_value        = sum(
         s["open_usdt"] for s in slots.values()
         if s is not None and isinstance(s, dict)
     )
-
-    # wallet_total is reported by slot 0 every 30s via get_all_significant_balances.
-    # It represents the true sum of every Binance spot balance at current market prices
-    # (all coins including BNB, orphan alts, active positions — excluding LD earn tokens).
-    # When present and fresh (< 120s old), use it directly so non-traded coins like BNB
-    # and any coin not in an active position are correctly included.
-    wallet_total = pool.get("wallet_total", 0.0)
-    wallet_ts    = pool.get("wallet_total_ts", 0.0)
-    _now         = time.time()
-    if wallet_total > 0 and (_now - wallet_ts) < 120:
-        # wallet_total already includes all spot balances; only add earn (LD tokens are excluded)
-        total_assets = wallet_total + earn_value
-        parked_value = 0.0  # already counted inside wallet_total (parked coins stay in wallet)
-    else:
-        # Fallback: reconstruct from parts (used before slot 0 has reported wallet_total)
-        total_assets = usdt_free + coin_value + earn_value + parked_value
+    # coin_value updates every ~5s (equity pusher) via live WS price × base qty.
+    # other_coins_usdt covers BNB and any coin not in an active position or parked (updates every 30s).
+    total_assets = usdt_free + coin_value + earn_value + other_coins_usdt + parked_value
 
     day_start = _load_day_start()
 
     if day_start is None or total_assets == 0:
         return {
-            "total_assets": total_assets,
-            "usdt_free":    usdt_free,
-            "coin_value":   coin_value,
-            "earn_value":   earn_value,
-            "parked_value": parked_value,
-            "day_start":    day_start or 0.0,
-            "pnl_usdt":     0.0,
-            "pnl_pct":      0.0,
-            "slots":        slots,
+            "total_assets":    total_assets,
+            "usdt_free":       usdt_free,
+            "coin_value":      coin_value,
+            "earn_value":      earn_value,
+            "parked_value":    parked_value,
+            "other_coins_usdt": other_coins_usdt,
+            "day_start":       day_start or 0.0,
+            "pnl_usdt":        0.0,
+            "pnl_pct":         0.0,
+            "slots":           slots,
         }
 
     pnl_usdt = total_assets - day_start
     pnl_pct  = pnl_usdt / day_start * 100 if day_start > 0 else 0.0
 
     return {
-        "total_assets": round(total_assets, 2),
-        "usdt_free":    round(usdt_free, 2),
-        "coin_value":   round(coin_value, 2),
-        "earn_value":   round(earn_value, 2),
-        "parked_value": round(parked_value, 2),
-        "day_start":    round(day_start, 2),
-        "pnl_usdt":     round(pnl_usdt, 2),
-        "pnl_pct":      round(pnl_pct, 4),
-        "slots":        slots,
+        "total_assets":    round(total_assets, 2),
+        "usdt_free":       round(usdt_free, 2),
+        "coin_value":      round(coin_value, 2),
+        "earn_value":      round(earn_value, 2),
+        "parked_value":    round(parked_value, 2),
+        "other_coins_usdt": round(other_coins_usdt, 2),
+        "day_start":       round(day_start, 2),
+        "pnl_usdt":        round(pnl_usdt, 2),
+        "pnl_pct":         round(pnl_pct, 4),
+        "slots":           slots,
     }
 
 

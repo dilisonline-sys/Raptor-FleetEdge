@@ -707,12 +707,15 @@ function renderFleet(pool) {
   Object.values(slots).forEach(s => {
     if (s) { totalOpen += s.open_usdt||0; totalPnl += s.daily_pnl||0; activeCount++; }
   });
-  // wallet_total (reported by slot 0) = true portfolio value including all coins.
-  // Falls back to sum of open positions when slot 0 hasn't reported yet.
-  const walletTotal = pool.wallet_total || 0;
-  const earnValue   = pool.earn_value   || 0;
-  const portfolioDisplay = walletTotal > 0
-    ? '$' + (walletTotal + earnValue).toFixed(2) + ' portfolio'
+  // Portfolio = usdt_free + open positions + BNB/other coins + earn + parked
+  // coin_value (totalOpen) updates every ~5s via equity pusher live WS price.
+  const usdtFree    = pool.usdt_free        || 0;
+  const otherCoins  = pool.other_coins_usdt || 0;
+  const earnValue   = pool.earn_value       || 0;
+  const parkedVal   = pool.parked_usdt      || 0;
+  const portfolioTotal = usdtFree + totalOpen + otherCoins + earnValue + parkedVal;
+  const portfolioDisplay = portfolioTotal > 0
+    ? '$' + portfolioTotal.toFixed(2) + ' portfolio'
     : '$' + totalOpen.toFixed(2) + ' open positions';
 
   const eqEl = document.getElementById('fleet-eq');
