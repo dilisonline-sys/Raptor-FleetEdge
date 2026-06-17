@@ -11,7 +11,10 @@ import time
 from pathlib import Path
 import config as cfg
 
-POOL_FILE = Path("/tmp/rfe_equity_pool.json")
+# Mode-specific pool file: live, demo, and testnet agents share the same /tmp
+# directory inside the container, so each mode must use a separate file to
+# prevent live balances from contaminating demo/testnet portfolio displays.
+POOL_FILE = Path(f"/tmp/rfe_equity_pool_{cfg.TRADING_MODE}.json")
 SLOT_TTL  = 90  # seconds without heartbeat → slot treated as dead
 
 
