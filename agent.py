@@ -301,6 +301,9 @@ async def main_loop():
     # Shared cache so the main cycle can read equity without an extra REST call
     _raw_usdt_cache = [0.0]
     _base_cache     = [0.0]
+    # Current position quantity written by main cycle, read by equity pusher.
+    # Using em.positions ensures accuracy immediately after open/close (not 30s stale _base).
+    _pos_qty: float = 0.0
 
     async def _equity_pusher():
         """Recompute displayed equity every 1s using live WS price + cached Binance balances.
@@ -324,16 +327,18 @@ async def main_loop():
 
                 # ── Balance refresh every 30s ─────────────────────────────────
                 if now - _last_fetch >= 30:
-                    _usdt, _base, _raw_usdt = await om.get_balances_raw(active_symbol)
+                    _usdt, _base, _raw_usdt, _total_stable = await om.get_balances_raw(active_symbol)
                     _last_fetch = now
-                    # raw USDT published to pool for order-sizing budget
-                    _ep.report_usdt(_raw_usdt)
+                    # Report total stablecoin balance (USDT+USDC+BUSD+FDUSD…) so the
+                    # portfolio panel shows the full cash-equivalent, not raw USDT only.
+                    _ep.report_usdt(_total_stable)
                     _raw_usdt_cache[0] = _raw_usdt
                     _base_cache[0]     = _base
 
                     # Slot 0: compute value of coins that are NOT in any active position
                     # and NOT parked (e.g. BNB held for fees, orphan alts).
-                    # Published as other_coins_usdt so portfolio_tracker counts everything.
+                    # Only exclude slots that actually have an open position (open_usdt > 1).
+                    # Idle slots must not hide their assigned coins from other_coins_usdt.
                     if _agent_slot == 0:
                         try:
                             _sig_bals = await om.get_all_significant_balances(min_usdt_value=0.5)
@@ -341,7 +346,7 @@ async def main_loop():
                             _act_bases = {
                                 s["symbol"].replace("USDT", "")
                                 for s in _pool_st.get("slots", {}).values()
-                                if s and s.get("symbol")
+                                if s and s.get("symbol") and s.get("open_usdt", 0.0) > 1.0
                             }
                             _park_bases = {sym.replace("USDT", "") for sym in _pc.get_parked()}
                             _other_val  = sum(
@@ -363,10 +368,10 @@ async def main_loop():
                         pass
 
                 # ── Push open_usdt to pool every 5s using live WS price ──────
-                # This makes the fleet-panel portfolio total near-realtime instead
-                # of waiting for the 60s main-cycle report.
+                # _pos_qty is updated each main cycle from em.positions (authoritative).
+                # This avoids stale _base mis-reporting after open/close for up to 30s.
                 if price > 0 and now - _last_pool_push >= 5:
-                    _open_val = round(max(0.0, _base) * price, 4)
+                    _open_val = round(max(0.0, _pos_qty) * price, 4)
                     _ep.report(_agent_slot, active_symbol, _open_val, _pool_pnl)
                     _last_pool_push = now
 
@@ -881,7 +886,7 @@ async def main_loop():
             # ── Orphan recovery: reconstruct position from existing balance ──
             if not _orphan_checked:
                 _orphan_checked = True
-                _fu, _bb, _ = await om.get_balances_raw(active_symbol)
+                _fu, _bb, *_ = await om.get_balances_raw(active_symbol)
                 _min_notional = 10.0 / current_price
                 if _bb > _min_notional and not em.positions:
                     _atr      = indicators["atr14"]
@@ -1458,7 +1463,7 @@ async def main_loop():
 
             if signal == "BUY" and not em.positions:
                 try:
-                    usdt_equiv, base_bal, raw_usdt = await om.get_balances_raw(active_symbol)
+                    usdt_equiv, base_bal, raw_usdt, *_ = await om.get_balances_raw(active_symbol)
                     equity = usdt_equiv + base_bal * current_price  # full equity (includes BTC)
                 except Exception as _bal_err:
                     log("AGENT", "BALANCE_FETCH_FAILED_GATE", error=str(_bal_err)[:160])
@@ -1763,6 +1768,7 @@ async def main_loop():
             # any position open/close that happened this cycle before the next 30s USDT refresh.
             _pool_open_usdt = sum(p.qty * current_price for p in em.positions)
             _pool_pnl = sum(p.qty * current_price - p.qty * p.avg_entry for p in em.positions)
+            _pos_qty = sum(p.qty for p in em.positions)   # equity pusher reads this
             _ep.report(_agent_slot, active_symbol, _pool_open_usdt, _pool_pnl)
 
             # ── Persist positions after every cycle ───────────────────────────

@@ -107,11 +107,12 @@ class OrderManager:
                     return float(b["free"])
         return 0.0
 
-    async def get_balances_raw(self, symbol: str) -> tuple[float, float, float]:
-        """Returns (non_base_usdt_equiv, base_qty, raw_usdt).
+    async def get_balances_raw(self, symbol: str) -> tuple[float, float, float, float]:
+        """Returns (non_base_usdt_equiv, base_qty, raw_usdt, total_stable).
         non_base_usdt_equiv = USDT + all non-active coins priced via batch fetch
         base_qty            = active base asset quantity (caller provides live price for it)
         raw_usdt            = spendable USDT only (for order sizing)
+        total_stable        = USDT + USDC + BUSD + FDUSD + … (all stablecoin balances summed)
         Equity = non_base_usdt_equiv + base_qty * live_price
         """
         await self._ensure_session()
@@ -133,8 +134,9 @@ class OrderManager:
         # Collect assets that need pricing (all except USDT and the active base)
         to_price = {a: q for a, q in bals.items()
                     if a not in ("USDT", base) and q >= 1e-8}
+        total_stable = sum(bals.get(s, 0.0) for s in self._STABLECOINS)
         if not to_price:
-            return usdt, bals.get(base, 0.0), raw_usdt
+            return usdt, bals.get(base, 0.0), raw_usdt, total_stable
 
         # Batch-fetch ALL USDT pair prices in one public call
         all_prices: dict[str, float] = {}
@@ -165,7 +167,7 @@ class OrderManager:
                 if cached > 0:
                     usdt += qty * cached
 
-        return usdt, bals.get(base, 0.0), raw_usdt
+        return usdt, bals.get(base, 0.0), raw_usdt, total_stable
 
     # Stablecoins to skip when iterating balances — they are USDT-equivalent, not tradeable positions
     _STABLECOINS = frozenset({"USDT", "USDC", "BUSD", "TUSD", "FDUSD", "USDP", "DAI", "USD1"})
