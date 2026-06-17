@@ -191,12 +191,14 @@ def get_state() -> dict:
 
 
 def get_other_symbols(slot: int) -> set[str]:
-    """Symbols actively traded by other slots or parked by stock agent — exclude set for scanner."""
+    """Symbols with an open position in other slots, or parked by stock agent.
+    Idle slots (registered but open_usdt == 0) are excluded — registration alone
+    must not prevent the BTC slot from entering its own permanently-assigned coin."""
     state = _live(_read())
     active = {
         s["symbol"]
         for k, s in state.get("slots", {}).items()
-        if s and int(k) != slot
+        if s and int(k) != slot and s.get("open_usdt", 0.0) > 1.0
     }
     parked = set(state.get("parked_symbols", []))
     return active | parked
