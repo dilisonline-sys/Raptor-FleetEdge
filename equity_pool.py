@@ -191,17 +191,30 @@ def get_state() -> dict:
 
 
 def get_other_symbols(slot: int) -> set[str]:
-    """Symbols with an open position in other slots, or parked by stock agent.
-    Idle slots (registered but open_usdt == 0) are excluded — registration alone
-    must not prevent the BTC slot from entering its own permanently-assigned coin."""
+    """All symbols registered by other slots (regardless of position state) plus parked symbols.
+    Used for scanner exclusion and the stock agent's managed-coin check.
+    Idle slots ARE included so the stock agent never auto-parks a permanently-assigned coin."""
     state = _live(_read())
     active = {
         s["symbol"]
         for k, s in state.get("slots", {}).items()
-        if s and int(k) != slot and s.get("open_usdt", 0.0) > 1.0
+        if s and int(k) != slot
     }
     parked = set(state.get("parked_symbols", []))
     return active | parked
+
+
+def get_open_symbols(slot: int) -> set[str]:
+    """Symbols with an ACTUAL OPEN POSITION in other slots (open_usdt > 1).
+    Used only for the BUY collision check — idle registered slots and parked
+    coins do not block entry.  Prevents the BTC slot being locked out by a
+    sibling that is merely registered but not currently holding a position."""
+    state = _live(_read())
+    return {
+        s["symbol"]
+        for k, s in state.get("slots", {}).items()
+        if s and int(k) != slot and s.get("open_usdt", 0.0) > 1.0
+    }
 
 
 def get_budget(slot: int, total_equity: float) -> float:

@@ -1078,21 +1078,43 @@ async def main_loop():
                 _session_realized_pnl += trade_pnl
                 push_log(f"[EXIT] {act} @ {current_price:.4f}")
                 if act.startswith("CLOSE:") and act.endswith(":STOP"):
-                    # Stop-loss hit: park the coin instead of selling.
-                    # The stock agent will sell it when price recovers 5%.
+                    # Stop-loss hit: cancel the exchange stop order first.
                     _pending_pos = [p for p in em.positions if p.pending_close]
                     for _pp in _pending_pos:
                         if _pp.exchange_stop_id > 0:
                             asyncio.create_task(om.cancel_order(active_symbol, _pp.exchange_stop_id))
                             _pp.exchange_stop_id = 0
                     _park_qty = _act_sell_qty if _act_sell_qty > 0 else sum(p.qty for p in _pending_pos)
-                    _pc.park(active_symbol, _park_qty, current_price, _agent_slot)
-                    em.positions = [p for p in em.positions if not p.pending_close]
-                    push_log(f"[STOP_PARK] {active_symbol} qty={round(_park_qty,6)} parked @ {current_price:.4f} — stock agent targets {round(current_price*1.05,4)}")
-                    log("AGENT", "STOP_PARK", symbol=active_symbol, qty=round(_park_qty,6),
-                        park_price=round(current_price,4), target=round(current_price*1.05,4))
-                    asyncio.create_task(asyncio.to_thread(
-                        _email.notify_fill, _agent_name, active_symbol, "PARK (stop)", _park_qty, current_price))
+
+                    if _agent_slot == 0:
+                        # Slot 0 is permanently BTC; stock agent is excluded from BTC, so a parked
+                        # BTC would never be recovered.  Sell directly and re-enter on next signal.
+                        if _park_qty > 0:
+                            _stop_sell_ord = await om.submit("SELL", _park_qty, tick, indicators,
+                                                             symbol=active_symbol)
+                            if _stop_sell_ord:
+                                em.positions = [p for p in em.positions if not p.pending_close]
+                                push_log(f"[STOP_SELL] {active_symbol} qty={round(_park_qty,6)} sold @ ~{current_price:.4f} — will re-enter on next signal")
+                                log("AGENT", "STOP_SELL", symbol=active_symbol,
+                                    qty=round(_park_qty,6), price=round(current_price,4))
+                                asyncio.create_task(asyncio.to_thread(
+                                    _email.notify_fill, _agent_name, active_symbol, "STOP_SELL",
+                                    _park_qty, current_price))
+                            else:
+                                for _pp in _pending_pos:
+                                    _pp.pending_close = False
+                                push_log(f"[STOP_SELL_WARN] {active_symbol} sell failed — retrying next cycle")
+                        else:
+                            em.positions = [p for p in em.positions if not p.pending_close]
+                    else:
+                        # Other slots: park the coin, stock agent monitors for +5% recovery.
+                        _pc.park(active_symbol, _park_qty, current_price, _agent_slot)
+                        em.positions = [p for p in em.positions if not p.pending_close]
+                        push_log(f"[STOP_PARK] {active_symbol} qty={round(_park_qty,6)} parked @ {current_price:.4f} — stock agent targets {round(current_price*1.05,4)}")
+                        log("AGENT", "STOP_PARK", symbol=active_symbol, qty=round(_park_qty,6),
+                            park_price=round(current_price,4), target=round(current_price*1.05,4))
+                        asyncio.create_task(asyncio.to_thread(
+                            _email.notify_fill, _agent_name, active_symbol, "PARK (stop)", _park_qty, current_price))
                 elif act.startswith("CLOSE:"):
                     # TIME or SIGNAL_REVERSAL exits — sell normally.
                     # C-1: position is marked pending_close in exit_manager; remove only after confirmed SELL.
@@ -1540,10 +1562,11 @@ async def main_loop():
                     push_log(f"[NN] {active_symbol} up={_nn_prob:.1%} — entry confirmed ({_gate_note})")
 
             if signal == "BUY" and not em.positions:
-                # NH-1: pool collision check applies to ALL strategies including ema_cross.
-                # Removing the ema_cross exemption prevents double ETH exposure when a momentum
-                # slot is already in ETHUSDT (which ema_cross now uses as its assigned coin).
-                if active_symbol in _ep.get_other_symbols(_agent_slot):
+                # NH-1: only block entry when another slot has an ACTUAL OPEN POSITION in this
+                # symbol (open_usdt > 1).  Idle/registered-only slots and parked coins must not
+                # block entry — get_open_symbols excludes both so the permanent BTC slot is
+                # never locked out by an idle sibling or its own parked stop-loss position.
+                if active_symbol in _ep.get_open_symbols(_agent_slot):
                     push_log(f"[SKIP] {active_symbol} already held by another slot — skipping to avoid duplicate exposure")
                     signal = "NONE"
 

@@ -26,9 +26,10 @@ SCAN_INTERVAL_SEC = 30   # how often to check prices
 _agent_name       = os.environ.get("AGENT_NAME", "stock_agent")
 
 # BNB is excluded: Binance uses BNB internally for fee discounts.
-# Selling BNB can disable the fee discount and cause unexpected fee increases.
-EXCLUDED_ASSETS   = {"BNB"}
-EXCLUDED_SYMBOLS  = {"BNBUSDT"}
+# BTC is excluded: slot 0 is permanently assigned to BTCUSDT and manages it directly.
+# The stock agent must never auto-park or sell BTC — that is slot 0's exclusive domain.
+EXCLUDED_ASSETS   = {"BNB", "BTC"}
+EXCLUDED_SYMBOLS  = {"BNBUSDT", "BTCUSDT"}
 
 # ── State ─────────────────────────────────────────────────────────────────────
 _sse_clients: list[web.StreamResponse] = []
