@@ -408,8 +408,10 @@ async def main_loop():
             active_symbol = "BTCUSDT"
             update_state(coin_mode="BTCUSDT")
         else:
-            # Multi-agent slots: use assigned symbol, auto-switch enabled
-            active_symbol = _env_symbol or "BTCUSDT"
+            # Multi-agent slots: use assigned symbol, auto-switch enabled.
+            # Fallback must NOT be BTCUSDT — slot 0 is permanently locked to BTC
+            # and an idle slot registered as BTCUSDT would falsely block slot 0's buys.
+            active_symbol = _env_symbol or "ETHUSDT"
             update_state(coin_mode="auto")
     else:
         # Testnet: start on specified coin, auto-switch enabled
