@@ -1184,7 +1184,7 @@ class AgentManager:
                     vol = float(t["quoteVolume"])
                     if vol < 15_000_000: continue
                     price = float(t["lastPrice"])
-                    if price < 50.0: continue
+                    if price < 5.0: continue
                     bid   = float(t.get("bidPrice") or price)
                     ask   = float(t.get("askPrice") or price)
                     mid   = (bid+ask)/2
