@@ -30,6 +30,7 @@ from logger import log
 import config as cfg
 import email_notifier as _email
 import equity_pool as _ep
+import parked_coins as _pc
 import ema_cross_module       as _ema_cross
 import rsi_reversal_module    as _rsi_rev
 import macd_cross_module      as _macd_cross
@@ -1032,7 +1033,24 @@ async def main_loop():
             for act, trade_pnl, _act_sell_qty in exit_actions:
                 _session_realized_pnl += trade_pnl
                 push_log(f"[EXIT] {act} @ {current_price:.4f}")
-                if act.startswith("CLOSE:"):
+                if act.startswith("CLOSE:") and act.endswith(":STOP"):
+                    # Stop-loss hit: park the coin instead of selling.
+                    # The stock agent will sell it when price recovers 5%.
+                    _pending_pos = [p for p in em.positions if p.pending_close]
+                    for _pp in _pending_pos:
+                        if _pp.exchange_stop_id > 0:
+                            asyncio.create_task(om.cancel_order(active_symbol, _pp.exchange_stop_id))
+                            _pp.exchange_stop_id = 0
+                    _park_qty = _act_sell_qty if _act_sell_qty > 0 else sum(p.qty for p in _pending_pos)
+                    _pc.park(active_symbol, _park_qty, current_price, _agent_slot)
+                    em.positions = [p for p in em.positions if not p.pending_close]
+                    push_log(f"[STOP_PARK] {active_symbol} qty={round(_park_qty,6)} parked @ {current_price:.4f} — stock agent targets {round(current_price*1.05,4)}")
+                    log("AGENT", "STOP_PARK", symbol=active_symbol, qty=round(_park_qty,6),
+                        park_price=round(current_price,4), target=round(current_price*1.05,4))
+                    asyncio.create_task(asyncio.to_thread(
+                        _email.notify_fill, _agent_name, active_symbol, "PARK (stop)", _park_qty, current_price))
+                elif act.startswith("CLOSE:"):
+                    # TIME or SIGNAL_REVERSAL exits — sell normally.
                     # C-1: position is marked pending_close in exit_manager; remove only after confirmed SELL.
                     # C-3: cancel exchange stop before submitting market SELL to prevent double-sell.
                     _pending_pos = [p for p in em.positions if p.pending_close]

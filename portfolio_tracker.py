@@ -29,14 +29,15 @@ def get_portfolio_state() -> dict:
     except Exception:
         pass
 
-    slots      = pool.get("slots", {})
-    usdt_free  = pool.get("usdt_free", 0.0)
-    earn_value = pool.get("earn_value", 0.0)
-    coin_value = sum(
+    slots        = pool.get("slots", {})
+    usdt_free    = pool.get("usdt_free", 0.0)
+    earn_value   = pool.get("earn_value", 0.0)
+    parked_value = pool.get("parked_usdt", 0.0)
+    coin_value   = sum(
         s["open_usdt"] for s in slots.values()
         if s is not None and isinstance(s, dict)
     )
-    total_assets = usdt_free + coin_value + earn_value
+    total_assets = usdt_free + coin_value + earn_value + parked_value
 
     day_start = _load_day_start()
 
@@ -46,6 +47,7 @@ def get_portfolio_state() -> dict:
             "usdt_free":    usdt_free,
             "coin_value":   coin_value,
             "earn_value":   earn_value,
+            "parked_value": parked_value,
             "day_start":    day_start or 0.0,
             "pnl_usdt":     0.0,
             "pnl_pct":      0.0,
@@ -60,6 +62,7 @@ def get_portfolio_state() -> dict:
         "usdt_free":    round(usdt_free, 2),
         "coin_value":   round(coin_value, 2),
         "earn_value":   round(earn_value, 2),
+        "parked_value": round(parked_value, 2),
         "day_start":    round(day_start, 2),
         "pnl_usdt":     round(pnl_usdt, 2),
         "pnl_pct":      round(pnl_pct, 4),

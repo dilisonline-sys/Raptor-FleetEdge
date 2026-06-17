@@ -11,6 +11,7 @@ services:
       TZ: ${TZ:-Asia/Dubai}
     ports:
       - "7430:7430"   # agent manager dashboard
+      - "7431:7431"   # stock agent (parked-coin monitor)
       - "7432:7432"   # testnet agent
       - "7433:7433"   # demo agent
       - "7434:7434"   # live agent slot 0

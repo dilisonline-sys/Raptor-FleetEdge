@@ -33,8 +33,10 @@ _agents: dict[str, dict] = {}
 # Available coins fetched from Binance at startup — sorted by 24h volume
 _available_coins: list[str] = []
 BINANCE_PUBLIC = "https://api.binance.com"
-LIVE_PORTS  = {0: 7434, 1: 7435, 2: 7436, 3: 7437, 4: 7438}  # slot → dashboard port
-POOL_FILE   = "/tmp/rfe_equity_pool.json"
+LIVE_PORTS       = {0: 7434, 1: 7435, 2: 7436, 3: 7437, 4: 7438}  # slot → dashboard port
+STOCK_AGENT_PORT = 7431
+POOL_FILE        = "/tmp/rfe_equity_pool.json"  # legacy fallback path (unused after mode-specific fix)
+STOCK_AGENT_SCRIPT = Path(__file__).parent / "stock_agent.py"
 COIN_BLACKLIST  = {"BUSDUSDT", "USDCUSDT", "TUSDUSDT", "FDUSDUSDT", "USDPUSDT"}
 
 
@@ -142,22 +144,24 @@ def _startup_cleanup():
     reconcile open positions against Binance on their own startup).
 
     Cleared:
-      - equity pool  — stale slot registrations from the previous session
-      - portfolio day baseline — recalculated fresh on first agent spawn
+      - equity pool (all modes) — stale slot registrations from previous session
+      - portfolio day baseline (all modes) — recalculated fresh on first agent spawn
       - all *.log files in /tmp — truncated to zero for a clean session
 
     Preserved:
       - rfe_positions_<slot>.json — open position records for recovery
+      - rfe_parked_*.json        — parked coins survive manager restarts (stock agent keeps selling)
       - rfe_email_config.json     — user email settings
     """
     _tmp = Path("/tmp")
+    _pool_reset = {"slots": {}, "ts": 0, "usdt_free": 0, "earn_value": 0,
+                   "parked_usdt": 0, "parked_symbols": []}
 
-    # Reset equity pool
-    pool = Path(POOL_FILE)
-    pool.write_text(json.dumps({"slots": {}, "ts": 0, "usdt_free": 0, "earn_value": 0}))
-
-    # Remove portfolio day baseline — portfolio_tracker will recreate it
-    (_tmp / "rfe_portfolio_day.json").unlink(missing_ok=True)
+    # Reset all mode-specific equity pools and portfolio day baselines
+    for mode in ("live", "demo", "testnet"):
+        pool_path = _tmp / f"rfe_equity_pool_{mode}.json"
+        pool_path.write_text(json.dumps(_pool_reset))
+        (_tmp / f"rfe_portfolio_day_{mode}.json").unlink(missing_ok=True)
 
     # Truncate all rfe log files (preserves the file so tail -f keeps working)
     for log_file in sorted(_tmp.glob("rfe_*.log")):
@@ -248,6 +252,39 @@ def _stop(name: str) -> bool:
     _agents.pop(name, None)
     _save_state()
     return True
+
+
+def _spawn_stock_agent(mode: str = "live") -> dict | None:
+    """Launch the stock agent on port 7431 for the given mode."""
+    name     = f"stock_{mode}"
+    log_file = f"/tmp/rfe_{name}.log"
+    env = {**os.environ,
+           "TRADING_MODE": mode,
+           "AGENT_NAME":   name,
+           "AGENT_PORT":   str(STOCK_AGENT_PORT)}
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(STOCK_AGENT_SCRIPT)],
+            env=env,
+            stdout=open(log_file, "w"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        info = {"pid": proc.pid, "port": STOCK_AGENT_PORT, "mode": mode,
+                "symbol": "MULTI", "started_at": time.time(),
+                "log_file": log_file, "name": name, "slot": -1,
+                "strategy": "stock_monitor"}
+        _agents[name] = info
+        _save_state()
+        return info
+    except Exception:
+        return None
+
+
+def _stock_agent_running(mode: str = "live") -> bool:
+    name = f"stock_{mode}"
+    info = _agents.get(name)
+    return bool(info and _pid_alive(info.get("pid", 0)))
 
 
 # ── HTML ─────────────────────────────────────────────────────────────────────
@@ -951,6 +988,9 @@ class AgentManager:
         self._app.router.add_post("/api/email-pnl",        self._email_pnl_now)
         self._app.router.add_get("/api/env",               self._env_get)
         self._app.router.add_post("/api/env",              self._env_post)
+        self._app.router.add_get("/api/stock-agent",       self._stock_agent_status)
+        self._app.router.add_post("/api/stock-agent/start", self._stock_agent_start)
+        self._app.router.add_post("/api/stock-agent/stop",  self._stock_agent_stop)
         self._app.router.add_route("*", "/agent/{name}/{path:.*}", self._proxy)
 
     async def _dashboard(self, _):
@@ -1261,6 +1301,37 @@ class AgentManager:
                   f"coins: {result['top4']}")
         except Exception as e:
             print(f"[manager] auto-spawn error: {e}")
+
+        # Auto-start stock agent for live mode alongside the trading fleet
+        if not _stock_agent_running("live"):
+            info = _spawn_stock_agent("live")
+            if info:
+                print(f"[manager] stock agent started (pid={info['pid']}, port={STOCK_AGENT_PORT})")
+            else:
+                print("[manager] stock agent failed to start")
+
+    async def _stock_agent_status(self, _) -> web.Response:
+        mode    = "live"
+        running = _stock_agent_running(mode)
+        info    = _agents.get(f"stock_{mode}", {})
+        return web.json_response({"running": running, "mode": mode,
+                                   "port": STOCK_AGENT_PORT, "pid": info.get("pid", 0)})
+
+    async def _stock_agent_start(self, request: web.Request) -> web.Response:
+        body = await request.json() if request.content_length else {}
+        mode = body.get("mode", "live")
+        if _stock_agent_running(mode):
+            return web.json_response({"ok": False, "error": "stock agent already running"})
+        info = _spawn_stock_agent(mode)
+        if info:
+            return web.json_response({"ok": True, "pid": info["pid"], "port": STOCK_AGENT_PORT})
+        return web.json_response({"ok": False, "error": "failed to start stock agent"}, status=500)
+
+    async def _stock_agent_stop(self, request: web.Request) -> web.Response:
+        body = await request.json() if request.content_length else {}
+        mode = body.get("mode", "live")
+        stopped = _stop(f"stock_{mode}")
+        return web.json_response({"ok": stopped})
 
     def _load_email_cfg(self) -> dict:
         try:
