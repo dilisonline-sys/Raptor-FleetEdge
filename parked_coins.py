@@ -14,7 +14,9 @@ from pathlib import Path
 import config as cfg
 
 PARK_FILE = Path(f"/tmp/rfe_parked_{cfg.TRADING_MODE}.json")
-RECOVERY_PCT = 1.05  # 5% above park price
+RECOVERY_PCT     = 1.05  # 5% above park price
+# BNB is excluded: Binance uses it internally for fee discounts
+EXCLUDED_SYMBOLS = {"BNBUSDT"}
 
 
 def _read() -> dict:
@@ -52,6 +54,8 @@ def _modify(fn):
 
 def park(symbol: str, qty: float, park_price: float, slot: int) -> None:
     """Register a coin as parked after stop-loss. Overwrites any prior entry for this symbol."""
+    if symbol in EXCLUDED_SYMBOLS:
+        return
     def _fn(state):
         state[symbol] = {
             "qty":          round(qty, 8),
