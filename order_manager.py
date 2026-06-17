@@ -109,39 +109,63 @@ class OrderManager:
 
     async def get_balances_raw(self, symbol: str) -> tuple[float, float, float]:
         """Returns (non_base_usdt_equiv, base_qty, raw_usdt).
-        non_base_usdt_equiv = USDT + all non-active coins priced at REST (BTC, orphan alts, etc.)
+        non_base_usdt_equiv = USDT + all non-active coins priced via batch fetch
         base_qty            = active base asset quantity (caller provides live price for it)
         raw_usdt            = spendable USDT only (for order sizing)
-        This split lets callers compute: equity = non_base_usdt_equiv + base_qty * live_price
+        Equity = non_base_usdt_equiv + base_qty * live_price
         """
         await self._ensure_session()
         base = symbol.replace("USDT", "")
         params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
         params["signature"] = _sign(params)
-        async with self._session.get(cfg.SPOT_BASE_URL + "/api/v3/account", params=params) as r:
+        async with self._session.get(
+            cfg.SPOT_BASE_URL + "/api/v3/account",
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
             r.raise_for_status()
-            data     = await r.json()
-            bals     = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in data["balances"]}
-            raw_usdt = bals.get("USDT", 0.0)
-            usdt     = raw_usdt
-            # Price every non-USDT coin EXCEPT the active base (caller prices that with live WS tick)
-            for asset, bal in bals.items():
-                if asset in ("USDT", base) or bal < 1e-8:
-                    continue
-                try:
-                    async with self._session.get(
-                        cfg.PUBLIC_DATA_URL + "/api/v3/ticker/price",
-                        params={"symbol": asset + "USDT"}
-                    ) as rp:
-                        coin_price = float((await rp.json()).get("price", 0))
-                    if coin_price > 0:
-                        self._price_cache[asset] = coin_price
-                        usdt += bal * coin_price
-                except Exception:
-                    cached = self._price_cache.get(asset, 0.0)
-                    if cached > 0:
-                        usdt += bal * cached
+            data = await r.json()
+
+        bals     = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in data["balances"]}
+        raw_usdt = bals.get("USDT", 0.0)
+        usdt     = raw_usdt
+
+        # Collect assets that need pricing (all except USDT and the active base)
+        to_price = {a: q for a, q in bals.items()
+                    if a not in ("USDT", base) and q >= 1e-8}
+        if not to_price:
             return usdt, bals.get(base, 0.0), raw_usdt
+
+        # Batch-fetch ALL USDT pair prices in one public call
+        all_prices: dict[str, float] = {}
+        try:
+            async with self._session.get(
+                cfg.PUBLIC_DATA_URL + "/api/v3/ticker/price",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as rp:
+                rp.raise_for_status()
+                for item in await rp.json():
+                    sym = item.get("symbol", "")
+                    if sym.endswith("USDT"):
+                        try:
+                            all_prices[sym] = float(item["price"])
+                        except (ValueError, KeyError):
+                            pass
+        except Exception as e:
+            log("ORDER_MANAGER", "BATCH_PRICE_FETCH_FAILED", error=str(e)[:80])
+
+        for asset, qty in to_price.items():
+            price = all_prices.get(asset + "USDT", 0.0)
+            if price > 0:
+                self._price_cache[asset] = price
+                usdt += qty * price
+            else:
+                # Fall back to cache for assets without a direct USDT pair (e.g. LD tokens)
+                cached = self._price_cache.get(asset, 0.0)
+                if cached > 0:
+                    usdt += qty * cached
+
+        return usdt, bals.get(base, 0.0), raw_usdt
 
     # Stablecoins to skip when iterating balances — they are USDT-equivalent, not tradeable positions
     _STABLECOINS = frozenset({"USDT", "USDC", "BUSD", "TUSD", "FDUSD", "USDP", "DAI", "USD1"})

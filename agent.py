@@ -320,11 +320,22 @@ async def main_loop():
                 if now - _last_fetch >= 30:
                     _usdt, _base, _raw_usdt = await om.get_balances_raw(active_symbol)
                     _last_fetch  = now
-                    # Publish raw USDT to the equity pool so portfolio_tracker can aggregate
+                    # Publish raw USDT to equity pool (used for order-sizing budget)
                     _ep.report_usdt(_raw_usdt)
                     # Update shared cache for main cycle's equity computation
                     _raw_usdt_cache[0] = _raw_usdt
                     _base_cache[0]     = _base
+                    # Slot 0 is responsible for the authoritative portfolio total.
+                    # wallet_total = all Binance balances at current prices (excl. LD earn).
+                    # This correctly includes BNB, orphan alts, and every active position
+                    # so portfolio_tracker doesn't need to reconstruct from parts.
+                    if _agent_slot == 0:
+                        try:
+                            _sig_bals = await om.get_all_significant_balances(min_usdt_value=0.5)
+                            _wallet_total = _raw_usdt + sum(b["usdt_value"] for b in _sig_bals)
+                            _ep.report_wallet_total(_wallet_total)
+                        except Exception:
+                            pass
                 # Slot 0 fetches Simple Earn (LD) holdings every 5 min and writes to pool
                 if _agent_slot == 0 and now - _last_earn_fetch >= 300:
                     try:

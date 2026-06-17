@@ -37,7 +37,22 @@ def get_portfolio_state() -> dict:
         s["open_usdt"] for s in slots.values()
         if s is not None and isinstance(s, dict)
     )
-    total_assets = usdt_free + coin_value + earn_value + parked_value
+
+    # wallet_total is reported by slot 0 every 30s via get_all_significant_balances.
+    # It represents the true sum of every Binance spot balance at current market prices
+    # (all coins including BNB, orphan alts, active positions — excluding LD earn tokens).
+    # When present and fresh (< 120s old), use it directly so non-traded coins like BNB
+    # and any coin not in an active position are correctly included.
+    wallet_total = pool.get("wallet_total", 0.0)
+    wallet_ts    = pool.get("wallet_total_ts", 0.0)
+    _now         = time.time()
+    if wallet_total > 0 and (_now - wallet_ts) < 120:
+        # wallet_total already includes all spot balances; only add earn (LD tokens are excluded)
+        total_assets = wallet_total + earn_value
+        parked_value = 0.0  # already counted inside wallet_total (parked coins stay in wallet)
+    else:
+        # Fallback: reconstruct from parts (used before slot 0 has reported wallet_total)
+        total_assets = usdt_free + coin_value + earn_value + parked_value
 
     day_start = _load_day_start()
 
