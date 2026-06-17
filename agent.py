@@ -304,39 +304,56 @@ async def main_loop():
 
     async def _equity_pusher():
         """Recompute displayed equity every 1s using live WS price + cached Binance balances.
-        Balances are re-fetched from the API every 30s; valuation uses the WS tick price.
-        Slot 0 also fetches Simple Earn (LD) value every 5 min and publishes to the pool."""
-        _usdt           = 0.0
-        _base           = 0.0
-        _raw_usdt       = 0.0
-        _last_fetch     = 0.0
+
+        Balances re-fetched from API every 30s; equity display uses live WS tick price.
+        Pool open_usdt pushed every 5s so the manager fleet panel stays near-realtime.
+        Slot 0 also computes other_coins_usdt (BNB, orphan alts not in active positions)
+        and Simple Earn value.
+        """
+        _usdt            = 0.0
+        _base            = 0.0
+        _raw_usdt        = 0.0
+        _last_fetch      = 0.0
         _last_earn_fetch = 0.0
+        _last_pool_push  = 0.0   # separate timer — push open_usdt every 5s
         import time as _time
         while True:
             try:
                 now   = _time.time()
                 price = (md._ws_ticker or {}).get("price", 0)
-                # Refresh raw balances from Binance API every 30s
+
+                # ── Balance refresh every 30s ─────────────────────────────────
                 if now - _last_fetch >= 30:
                     _usdt, _base, _raw_usdt = await om.get_balances_raw(active_symbol)
-                    _last_fetch  = now
-                    # Publish raw USDT to equity pool (used for order-sizing budget)
+                    _last_fetch = now
+                    # raw USDT published to pool for order-sizing budget
                     _ep.report_usdt(_raw_usdt)
-                    # Update shared cache for main cycle's equity computation
                     _raw_usdt_cache[0] = _raw_usdt
                     _base_cache[0]     = _base
-                    # Slot 0 is responsible for the authoritative portfolio total.
-                    # wallet_total = all Binance balances at current prices (excl. LD earn).
-                    # This correctly includes BNB, orphan alts, and every active position
-                    # so portfolio_tracker doesn't need to reconstruct from parts.
+
+                    # Slot 0: compute value of coins that are NOT in any active position
+                    # and NOT parked (e.g. BNB held for fees, orphan alts).
+                    # Published as other_coins_usdt so portfolio_tracker counts everything.
                     if _agent_slot == 0:
                         try:
                             _sig_bals = await om.get_all_significant_balances(min_usdt_value=0.5)
-                            _wallet_total = _raw_usdt + sum(b["usdt_value"] for b in _sig_bals)
-                            _ep.report_wallet_total(_wallet_total)
+                            _pool_st  = _ep.get_state()
+                            _act_bases = {
+                                s["symbol"].replace("USDT", "")
+                                for s in _pool_st.get("slots", {}).values()
+                                if s and s.get("symbol")
+                            }
+                            _park_bases = {sym.replace("USDT", "") for sym in _pc.get_parked()}
+                            _other_val  = sum(
+                                b["usdt_value"] for b in _sig_bals
+                                if b["asset"] not in _act_bases
+                                and b["asset"] not in _park_bases
+                            )
+                            _ep.report_other_coins(_other_val)
                         except Exception:
                             pass
-                # Slot 0 fetches Simple Earn (LD) holdings every 5 min and writes to pool
+
+                # ── Simple Earn every 5 min (slot 0 only) ────────────────────
                 if _agent_slot == 0 and now - _last_earn_fetch >= 300:
                     try:
                         earn_val = await om.get_earn_value()
@@ -344,7 +361,16 @@ async def main_loop():
                         _last_earn_fetch = now
                     except Exception:
                         pass
-                # _usdt = USDT + all other coins priced at REST; add active base at live WS price
+
+                # ── Push open_usdt to pool every 5s using live WS price ──────
+                # This makes the fleet-panel portfolio total near-realtime instead
+                # of waiting for the 60s main-cycle report.
+                if price > 0 and now - _last_pool_push >= 5:
+                    _open_val = round(max(0.0, _base) * price, 4)
+                    _ep.report(_agent_slot, active_symbol, _open_val, _pool_pnl)
+                    _last_pool_push = now
+
+                # ── Equity display on individual agent dashboard (every 1s) ──
                 if price > 0:
                     _coin_asset = active_symbol[:-4] if active_symbol.endswith("USDT") else active_symbol
                     update_state(
