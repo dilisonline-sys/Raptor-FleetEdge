@@ -160,18 +160,37 @@ def deregister(slot: int):
     _modify(_fn)
 
 
+def report_parked_usdt(value: float):
+    """Update the total USDT value of parked coins (written by stock agent each scan)."""
+    def _fn(state):
+        state["parked_usdt"] = round(value, 4)
+        return state
+    _modify(_fn)
+
+
+def set_parked_symbols(symbols: list):
+    """Update the list of parked coin symbols so trading agents can exclude them."""
+    def _fn(state):
+        state["parked_symbols"] = list(symbols)
+        return state
+    _modify(_fn)
+
+
 def get_state() -> dict:
     """Return current pool state with stale slots cleared."""
     return _live(_read())
 
 
 def get_other_symbols(slot: int) -> set[str]:
-    """Symbols actively traded by other slots — pass to scanner as exclude set."""
-    return {
+    """Symbols actively traded by other slots or parked by stock agent — exclude set for scanner."""
+    state = _live(_read())
+    active = {
         s["symbol"]
-        for k, s in _live(_read()).get("slots", {}).items()
+        for k, s in state.get("slots", {}).items()
         if s and int(k) != slot
     }
+    parked = set(state.get("parked_symbols", []))
+    return active | parked
 
 
 def get_budget(slot: int, total_equity: float) -> float:
