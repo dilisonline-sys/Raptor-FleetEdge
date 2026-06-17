@@ -107,9 +107,12 @@ FLEET_SIZE         = int(os.environ.get("DIPU_FLEET_SIZE", 5))
 # ── Per-mode risk parameters (testnet == demo; live can differ) ──
 _RISK = {
     #              risk_pct  max_trade  exposure  leverage  daily_dd  monthly_dd  consec_loss
-    "testnet": (   0.10,     0.30,      0.30,     3,        0.10,     0.15,       3 ),
-    "demo":    (   0.10,     0.30,      0.30,     3,        0.10,     0.15,       3 ),
-    "live":    (   0.10,     0.30,      0.40,     3,        0.10,     0.15,       3 ),
+    # H-5: RISK_PCT reduced from 10% to 2% (live) / 5% (test/demo).
+    # 10% per trade is far too aggressive for spot — industry standard is 1-2%.
+    # max_trade_pct is kept at 30% as the hard position-size cap.
+    "testnet": (   0.05,     0.30,      0.30,     3,        0.10,     0.15,       3 ),
+    "demo":    (   0.05,     0.30,      0.30,     3,        0.10,     0.15,       3 ),
+    "live":    (   0.02,     0.30,      0.40,     3,        0.10,     0.15,       3 ),
 }
 (RISK_PCT, MAX_TRADE_PCT, MAX_EXPOSURE, MAX_LEVERAGE,
  DAILY_DD_LIMIT, MONTHLY_DD_LIMIT, MAX_CONSEC_LOSS) = _RISK[TRADING_MODE]
