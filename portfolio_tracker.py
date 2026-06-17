@@ -7,9 +7,12 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+import config as cfg
 
-POOL_FILE      = Path("/tmp/rfe_equity_pool.json")
-DAY_START_FILE = Path("/tmp/rfe_portfolio_day.json")
+# Mode-specific files so live, demo, and testnet portfolios never share data.
+# All modes run as sub-processes inside the same container sharing /tmp.
+POOL_FILE      = Path(f"/tmp/rfe_equity_pool_{cfg.TRADING_MODE}.json")
+DAY_START_FILE = Path(f"/tmp/rfe_portfolio_day_{cfg.TRADING_MODE}.json")
 
 
 def get_portfolio_state() -> dict:
