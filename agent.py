@@ -1513,16 +1513,7 @@ async def main_loop():
                 if signal == "BUY" and atr_pct_live > MAX_ENTRY_ATR_PCT:
                     push_log(f"[SKIP] {active_symbol} ATR {atr_pct_live:.2f}% > {MAX_ENTRY_ATR_PCT}% cap — too volatile to enter safely")
                     signal = "NONE"
-                # Forecast gate: linear regression on last 20 candles must slope upward.
-                # A downward-sloping regression means recent price action is trending lower —
-                # entering a BUY against it would be fighting the short-term trend.
-                # Threshold: 0.01%/bar filters noise on flat markets; near-zero slope = neutral = allow.
-                if signal == "BUY" and _fc_slope_pct < -_FC_SLOPE_THRESHOLD:
-                    push_log(f"[SKIP] {active_symbol} forecast slope {_fc_slope_pct:+.3f}%/bar "
-                             f"(downtrend) — BUY blocked by regression gate")
-                    log("AGENT", "GATE_BLOCK_FORECAST", symbol=active_symbol,
-                        slope_pct=round(_fc_slope_pct, 4), threshold=-_FC_SLOPE_THRESHOLD)
-                    signal = "NONE"
+                # Regression gate removed — was blocking too many valid entries on minor pullbacks.
                 # NH-2: gate activates only when OOS accuracy ≥ 58% AND test set ≥ 50 samples.
                 # NM-3: predictor is None for ema_cross — gate is always inactive, entry allowed.
                 _nn_gate_active = (predictor is not None
