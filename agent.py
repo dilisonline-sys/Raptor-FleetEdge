@@ -1094,7 +1094,20 @@ async def main_loop():
                             _pp.exchange_stop_id = 0
                     _park_qty = _act_sell_qty if _act_sell_qty > 0 else sum(p.qty for p in _pending_pos)
 
-                    if _agent_slot == 0:
+                    # Edge case: if price gapped down fast enough that Binance executed the
+                    # exchange STOP_LOSS_LIMIT before our software detection fired, the coin
+                    # is already gone from the wallet.  Detect this by checking the live base
+                    # balance — if it's below min notional the exchange stop already filled.
+                    _live_base = await om.get_base_balance(active_symbol)
+                    _min_notional_qty = 10.0 / current_price   # ~$10 minimum
+                    if _live_base < _min_notional_qty:
+                        # Exchange stop already executed — just clear the position record.
+                        em.positions = [p for p in em.positions if not p.pending_close]
+                        push_log(f"[STOP_EXCH] {active_symbol} exchange stop already filled "
+                                 f"(balance={_live_base:.6f} < {_min_notional_qty:.6f}) — position cleared")
+                        log("AGENT", "STOP_EXCH_PREFILL", symbol=active_symbol,
+                            live_base=round(_live_base, 8), expected_qty=round(_park_qty, 6))
+                    elif _agent_slot == 0:
                         # Slot 0 is permanently BTC; stock agent is excluded from BTC, so a parked
                         # BTC would never be recovered.  Sell directly and re-enter on next signal.
                         if _park_qty > 0:
