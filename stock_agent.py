@@ -255,6 +255,17 @@ async def _scan_once(om: _om_mod.OrderManager, http: aiohttp.ClientSession):
             ind  = {"atr14": price * 0.01, "rsi14": 50.0,
                     "ema20": price, "ema50": price}
             try:
+                # If the trading agent already sold this coin on stop loss the wallet
+                # balance will be ~0.  Detect this and just unpark rather than
+                # attempting a sell that would fail with insufficient balance.
+                _min_qty = 10.0 / price
+                _live_qty = await om.get_base_balance(sym)
+                if _live_qty < _min_qty:
+                    _pc.unpark(sym)
+                    push_log(f"[UNPARK] {sym} already sold (balance={_live_qty:.6f}) — removed from registry")
+                    log("STOCK_AGENT", "UNPARK_ALREADY_SOLD", symbol=sym,
+                        balance=round(_live_qty, 8))
+                    return
                 sold = await om.submit("SELL", qty, tick, ind, symbol=sym)
                 if sold:
                     _pc.unpark(sym)

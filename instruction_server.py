@@ -9,7 +9,7 @@ from aiohttp import web
 from logger import log
 import config as cfg
 
-VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO", "ANALYST_ON", "ANALYST_OFF", "SET_STRATEGY", "SET_RISK"}
+VALID_ACTIONS = {"BUY", "SELL", "CLOSE_ALL", "HALT", "RESUME", "STATUS", "SWITCH_MODE", "SWITCH_COIN", "FORCE_BTC", "RESUME_AUTO", "ANALYST_ON", "ANALYST_OFF", "SET_STRATEGY", "SET_RISK", "AUTO_STRATEGY_ON", "AUTO_STRATEGY_OFF"}
 
 _state = {
     "started_at":    time.time(),
@@ -46,8 +46,9 @@ _state = {
     "coin_qty":         0.0,
     "coin_value_usdt":  0.0,
     "coin_asset":       "—",
-    "analyst_enabled": False,
-    "analysis":        {},
+    "analyst_enabled":  False,
+    "auto_strategy":    True,
+    "analysis":         {},
     "portfolio":        {},
     "advised_strategy":        "—",
     "advised_strategy_label":  "—",
@@ -253,6 +254,12 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
   <span style="color:#aaa;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em">Strategy</span>
   <div id="strategy-selector" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+  <button id="auto-strat-btn" onclick="toggleAutoStrategy()"
+    style="margin-left:4px;padding:3px 9px;border-radius:4px;border:1px solid #333;
+           background:#111;color:#aaa;font-size:.65rem;cursor:pointer;letter-spacing:.05em"
+    title="Auto-strategy: advisor switches strategy between trades based on market conditions">
+    AUTO
+  </button>
 </div>
 <div id="strategy-advice-bar" style="display:none;margin-bottom:12px;padding:6px 12px;background:#0d1a0d;border:1px solid #1a3a1a;border-radius:5px;font-size:.70rem;color:#aaa;line-height:1.5">
   <span style="color:#00e676;font-weight:bold">&#9670; Advisor: </span>
@@ -619,6 +626,10 @@ function connectSSE() {
       renderScanner(s);
       syncHaltButtons(s.halt || false);
       renderAnalyst(s);
+      if (s.auto_strategy !== undefined) {
+        _autoStratEnabled = s.auto_strategy;
+        _renderAutoStratBtn(s.auto_strategy);
+      }
       // On symbol switch or new chart data: reload historical candles
       const sym = s.symbol || '';
       if (sym && sym !== _currentSym) {
@@ -1143,6 +1154,33 @@ async function loadOrders() {
     }
   } catch(e) { console.error('orders fetch:', e); }
   document.getElementById('orders-refresh').textContent = '⟳ refresh';
+}
+
+// ── Auto-strategy toggle ──────────────────────────────────
+let _autoStratEnabled = true;
+
+async function toggleAutoStrategy() {
+  const newState = !_autoStratEnabled;
+  _autoStratEnabled = newState;
+  _renderAutoStratBtn(newState);
+  const action = newState ? 'AUTO_STRATEGY_ON' : 'AUTO_STRATEGY_OFF';
+  await fetch('/instruction', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-Agent-Token':'internal'},
+    body: JSON.stringify({action, source:'dashboard'})
+  });
+}
+
+function _renderAutoStratBtn(enabled) {
+  const btn = document.getElementById('auto-strat-btn');
+  if (!btn) return;
+  btn.textContent = enabled ? 'AUTO ✓' : 'AUTO';
+  btn.style.background   = enabled ? '#0a1f0a' : '#111';
+  btn.style.borderColor  = enabled ? '#00e676' : '#333';
+  btn.style.color        = enabled ? '#00e676' : '#aaa';
+  btn.title = enabled
+    ? 'Auto-strategy ON — advisor will switch strategy between trades'
+    : 'Auto-strategy OFF — strategy locked until manually changed';
 }
 
 // ── Rule Analyst ──────────────────────────────────────────
