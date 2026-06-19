@@ -233,7 +233,15 @@ async def main_loop():
     fg       = FearGreedClient()
     _agent_slot = int(os.environ.get("AGENT_SLOT", "0"))
     _agent_name = os.environ.get("AGENT_NAME", f"fleetedge{_agent_slot + 1}")
-    _strategy      = os.environ.get("AGENT_STRATEGY", "momentum").lower()
+    # Slot 0 is permanently BTC and cannot rotate to a trending coin when BTC consolidates.
+    # "momentum" only fires in TRENDING — slot 0 would idle indefinitely during ranging BTC.
+    # "ema_cross" is not in RANGING_SKIP_STRATEGIES so it trades both trending and ranging BTC.
+    _default_strategy = (
+        "ema_cross"
+        if _agent_slot == 0 and cfg.TRADING_MODE == "live"
+        else "momentum"
+    )
+    _strategy      = os.environ.get("AGENT_STRATEGY", _default_strategy).lower()
     _strategies: list = [_strategy]    # multi-strategy list; [0] = primary driver
     _risk_pct      = cfg.RISK_PCT       # overridable per-agent risk fraction
     _max_trade_pct = cfg.MAX_TRADE_PCT  # overridable per-agent max-trade fraction
