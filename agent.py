@@ -245,6 +245,13 @@ async def main_loop():
     _strategies: list = [_strategy]    # multi-strategy list; [0] = primary driver
     _risk_pct      = cfg.RISK_PCT       # overridable per-agent risk fraction
     _max_trade_pct = cfg.MAX_TRADE_PCT  # overridable per-agent max-trade fraction
+    # Auto-strategy: advisor scores all strategies each cycle; auto-switch fires when a
+    # better strategy has been consistently recommended for N cycles with a clear margin.
+    _auto_strategy:          bool     = os.environ.get("AGENT_AUTO_STRATEGY", "true").lower() != "false"
+    _AUTO_STRAT_CONFIRM_MIN: int      = 3     # consecutive cycles confirming before switch
+    _AUTO_STRAT_SCORE_MARGIN: float   = 1.5   # advisor must score new strat this much better
+    _auto_strat_candidate:   str | None = None
+    _auto_strat_confirm:     int      = 0
     analyst   = RuleAnalyst()
     selector  = RuleCoinSelector()
     # NM-3: predictor is only used by momentum — skip heavy numpy weight init for all other strategies
@@ -557,7 +564,8 @@ async def main_loop():
                  session_pnl=0.0, session_pnl_pct=0.0,
                  strategy=_strategy_label, strategy_key=_strategy,
                  strategy_keys=_strategies,
-                 risk_pct=_risk_pct, max_trade_pct=_max_trade_pct)
+                 risk_pct=_risk_pct, max_trade_pct=_max_trade_pct,
+                 auto_strategy=_auto_strategy)
 
     # ── Staggered startup: let earlier slots register in pool before this one
     # scans for a coin, preventing all agents from picking the same top coin simultaneously.
@@ -781,6 +789,18 @@ async def main_loop():
                                  + (f" + {_sec}" if _sec else ""))
                         log("AGENT", "STRATEGY_SWITCHED", from_=_old_strat, to=_strategy,
                             secondaries=_strategies[1:])
+                elif action == "AUTO_STRATEGY_ON":
+                    _auto_strategy = True
+                    _auto_strat_candidate = None
+                    _auto_strat_confirm   = 0
+                    update_state(auto_strategy=True)
+                    push_log("[AUTO_STRAT] Enabled — advisor will auto-switch strategy between trades")
+                elif action == "AUTO_STRATEGY_OFF":
+                    _auto_strategy = False
+                    _auto_strat_candidate = None
+                    _auto_strat_confirm   = 0
+                    update_state(auto_strategy=False)
+                    push_log("[AUTO_STRAT] Disabled — strategy locked until manually changed")
                 elif action == "SET_RISK":
                     _new_r = instr.get("risk_pct")
                     _new_m = instr.get("max_trade_pct")
@@ -1023,6 +1043,56 @@ async def main_loop():
             _advice = _advisor.advice_payload(indicators, regime)
             update_state(**_advice)
 
+            # ── Auto-strategy: switch to advisor's top pick between trades ────────
+            # Conditions: auto enabled, no open position, new strategy consistently
+            # recommended for _AUTO_STRAT_CONFIRM_MIN cycles with a clear score margin.
+            # Never switches mid-trade; resets confirmation counter on any disagreement.
+            if _auto_strategy and not em.positions:
+                _best_key   = _advice["advised_strategy"]
+                _best_score = _advice["advised_strategy_score"]
+                _all_scores = {e["key"]: e["score"] for e in _advice["strategy_scores"]}
+                _curr_score = _all_scores.get(_strategy, 0.0)
+                if (_best_key != _strategy
+                        and _best_score - _curr_score >= _AUTO_STRAT_SCORE_MARGIN):
+                    if _auto_strat_candidate == _best_key:
+                        _auto_strat_confirm += 1
+                    else:
+                        _auto_strat_candidate = _best_key
+                        _auto_strat_confirm   = 1
+                    push_log(f"[AUTO_STRAT] {_best_key.upper()} scores {_best_score:.1f} "
+                             f"(current={_strategy} {_curr_score:.1f}, "
+                             f"margin=+{_best_score - _curr_score:.1f}) "
+                             f"— confirming {_auto_strat_confirm}/{_AUTO_STRAT_CONFIRM_MIN}")
+                    if _auto_strat_confirm >= _AUTO_STRAT_CONFIRM_MIN:
+                        _old_strat            = _strategy
+                        _strategies           = [_best_key]
+                        _strategy             = _best_key
+                        _strategy_label       = STRATEGY_LABELS[_strategy]
+                        _prev_indicators      = None   # reset EMA/MACD crossover state
+                        _auto_strat_candidate = None
+                        _auto_strat_confirm   = 0
+                        # Predictor lifecycle: momentum needs PricePredictor; others don't.
+                        # Creating a fresh instance (is_trained=False) lets the existing
+                        # NN training block handle the actual fit on the next cycle.
+                        if _strategy == "momentum" and predictor is None:
+                            predictor = PricePredictor()
+                        elif _strategy != "momentum":
+                            predictor = None
+                        # coin_mode: ema_cross locks to current coin; others allow rotation
+                        _new_coin_mode = active_symbol if _strategy == "ema_cross" else "auto"
+                        update_state(strategy=_strategy_label, strategy_key=_strategy,
+                                     strategy_keys=_strategies, coin_mode=_new_coin_mode)
+                        push_log(f"[AUTO_STRAT] {_old_strat} → {_strategy} "
+                                 f"(score {_curr_score:.1f} → {_best_score:.1f}): "
+                                 f"{_advice['advised_strategy_reason']}")
+                        log("AGENT", "AUTO_STRATEGY_SWITCH", from_=_old_strat, to=_strategy,
+                            score_before=round(_curr_score, 1), score_after=round(_best_score, 1),
+                            reason=_advice["advised_strategy_reason"][:100])
+                else:
+                    # No switch needed or margin not met — reset confirmation window
+                    _auto_strat_candidate = None
+                    _auto_strat_confirm   = 0
+
             # ── Rule Analyst (advisory) ─────────────────────────────────────────
             if analyst.enabled:
                 _pos_info = None
@@ -1128,14 +1198,30 @@ async def main_loop():
                         else:
                             em.positions = [p for p in em.positions if not p.pending_close]
                     else:
-                        # Other slots: park the coin, stock agent monitors for +5% recovery.
-                        _pc.park(active_symbol, _park_qty, current_price, _agent_slot)
-                        em.positions = [p for p in em.positions if not p.pending_close]
-                        push_log(f"[STOP_PARK] {active_symbol} qty={round(_park_qty,6)} parked @ {current_price:.4f} — stock agent targets {round(current_price*1.05,4)}")
-                        log("AGENT", "STOP_PARK", symbol=active_symbol, qty=round(_park_qty,6),
-                            park_price=round(current_price,4), target=round(current_price*1.05,4))
-                        asyncio.create_task(asyncio.to_thread(
-                            _email.notify_fill, _agent_name, active_symbol, "PARK (stop)", _park_qty, current_price))
+                        # Slots 1-4: sell immediately to USDT, then park in registry so the
+                        # stock agent monitors for price recovery above the stop level.
+                        if _park_qty > 0:
+                            _stop_sell_ord = await om.submit("SELL", _park_qty, tick, indicators,
+                                                             symbol=active_symbol)
+                            if _stop_sell_ord:
+                                em.positions = [p for p in em.positions if not p.pending_close]
+                                # Park after confirmed sell — stock agent watches for +5% recovery.
+                                _pc.park(active_symbol, _park_qty, current_price, _agent_slot)
+                                push_log(f"[STOP_SELL+PARK] {active_symbol} qty={round(_park_qty,6)} "
+                                         f"sold @ ~{current_price:.4f} — monitoring recovery target "
+                                         f"{round(current_price*1.05,4)}")
+                                log("AGENT", "STOP_SELL_PARK", symbol=active_symbol,
+                                    qty=round(_park_qty,6), price=round(current_price,4),
+                                    target=round(current_price*1.05,4))
+                                asyncio.create_task(asyncio.to_thread(
+                                    _email.notify_fill, _agent_name, active_symbol,
+                                    "STOP_SELL+PARK", _park_qty, current_price))
+                            else:
+                                for _pp in _pending_pos:
+                                    _pp.pending_close = False
+                                push_log(f"[STOP_SELL_WARN] {active_symbol} sell failed — retrying next cycle")
+                        else:
+                            em.positions = [p for p in em.positions if not p.pending_close]
                 elif act.startswith("CLOSE:"):
                     # TIME or SIGNAL_REVERSAL exits — sell normally.
                     # C-1: position is marked pending_close in exit_manager; remove only after confirmed SELL.
