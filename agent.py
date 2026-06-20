@@ -789,6 +789,23 @@ async def main_loop():
                                  + (f" + {_sec}" if _sec else ""))
                         log("AGENT", "STRATEGY_SWITCHED", from_=_old_strat, to=_strategy,
                             secondaries=_strategies[1:])
+                        # Recalculate unhit TPs on any open position using last-known ATR.
+                        # Stop is left untouched — moving it mid-trade changes committed risk.
+                        if em.positions and _closed_indicators:
+                            _atr_now = _closed_indicators.get("atr14", 0)
+                            if _atr_now > 0:
+                                _sd = _atr_now * cfg.ATR_STOP_MULT
+                                for _rp in em.positions:
+                                    if _rp.pending_close:
+                                        continue
+                                    _dir = 1 if _rp.side == "BUY" else -1
+                                    if not _rp.tp1_hit:
+                                        _rp.tp1 = round(_rp.avg_entry + _dir * _sd * cfg.TP1_R, 4)
+                                    if not _rp.tp2_hit:
+                                        _rp.tp2 = round(_rp.avg_entry + _dir * _sd * cfg.TP2_R, 4)
+                                    if not _rp.tp3_hit:
+                                        _rp.tp3 = round(_rp.avg_entry + _dir * _sd * cfg.TP3_R, 4)
+                                push_log(f"[SET_STRATEGY] TPs recalculated for {len(em.positions)} open position(s)")
                 elif action == "AUTO_STRATEGY_ON":
                     _auto_strategy = True
                     _auto_strat_candidate = None
@@ -920,10 +937,10 @@ async def main_loop():
                 _min_notional = 10.0 / current_price
                 if _bb > _min_notional and not em.positions:
                     _atr      = indicators["atr14"]
-                    _h1r      = indicators.get("h1_range", 0)
-                    _tp1_dist = _h1r * 0.40 if _h1r > 0 else _atr * cfg.ATR_STOP_MULT * cfg.TP1_R
-                    _tp2_dist = _h1r * 0.80 if _h1r > 0 else _atr * cfg.ATR_STOP_MULT * cfg.TP2_R
-                    _tp3_dist = _h1r * 1.25 if _h1r > 0 else _atr * cfg.ATR_STOP_MULT * cfg.TP3_R
+                    _stop_d   = _atr * cfg.ATR_STOP_MULT
+                    _tp1_dist = _stop_d * cfg.TP1_R
+                    _tp2_dist = _stop_d * cfg.TP2_R
+                    _tp3_dist = _stop_d * cfg.TP3_R
                     # FIX-10: synthetic position uses current price as avg_entry (actual entry unknown).
                     # Stop is widened to 1.5×ATR so an upward-shifted entry doesn't prematurely
                     # stop out a position that was actually entered lower. Review manually via dashboard.
@@ -1606,12 +1623,8 @@ async def main_loop():
                 log("AGENT", "BUY_GATE_ENTER",
                     symbol=active_symbol, equity=round(equity, 2),
                     raw_usdt=round(raw_usdt, 2), price=current_price)
-                stop_d = indicators["atr14"] * cfg.ATR_STOP_MULT
-                # Effective TP1 uses the same floor logic as exit_manager: max(h1_range, ATR)
-                _h1r         = indicators.get("h1_range", 0)
-                _tp1_atr_d   = stop_d * cfg.TP1_R
-                _tp1_h1_d    = _h1r * 0.40 if _h1r > 0 else 0
-                tp1_dist     = max(_tp1_atr_d, _tp1_h1_d)
+                stop_d   = indicators["atr14"] * cfg.ATR_STOP_MULT
+                tp1_dist = stop_d * cfg.TP1_R
                 # FIX-5: Precision strategies (crossover/mean-reversion) use reduced TP threshold (0.15% vs 0.22%)
                 # without any gate, tight crossovers in ranging markets guaranteed fee losses.
                 _this_min_tp = current_price * (0.0015 if _strategy != "momentum" else 0.0022)
