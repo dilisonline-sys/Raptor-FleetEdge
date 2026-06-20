@@ -1043,11 +1043,11 @@ async def main_loop():
             _advice = _advisor.advice_payload(indicators, regime)
             update_state(**_advice)
 
-            # ── Auto-strategy: switch to advisor's top pick between trades ────────
-            # Conditions: auto enabled, no open position, new strategy consistently
-            # recommended for _AUTO_STRAT_CONFIRM_MIN cycles with a clear score margin.
-            # Never switches mid-trade; resets confirmation counter on any disagreement.
-            if _auto_strategy and not em.positions:
+            # ── Auto-strategy: build conviction continuously, execute at trade close ─
+            # Conviction accumulates every cycle (even mid-trade) so the switch is
+            # ready the instant a position closes.  Execution is still gated on
+            # no open position so exit logic is never disrupted mid-trade.
+            if _auto_strategy:
                 _best_key   = _advice["advised_strategy"]
                 _best_score = _advice["advised_strategy_score"]
                 _all_scores = {e["key"]: e["score"] for e in _advice["strategy_scores"]}
@@ -1059,11 +1059,14 @@ async def main_loop():
                     else:
                         _auto_strat_candidate = _best_key
                         _auto_strat_confirm   = 1
+                    _in_trade = bool(em.positions)
                     push_log(f"[AUTO_STRAT] {_best_key.upper()} scores {_best_score:.1f} "
                              f"(current={_strategy} {_curr_score:.1f}, "
                              f"margin=+{_best_score - _curr_score:.1f}) "
-                             f"— confirming {_auto_strat_confirm}/{_AUTO_STRAT_CONFIRM_MIN}")
-                    if _auto_strat_confirm >= _AUTO_STRAT_CONFIRM_MIN:
+                             f"— conviction {_auto_strat_confirm}/{_AUTO_STRAT_CONFIRM_MIN}"
+                             + (" [in trade — queued]" if _in_trade else ""))
+                    # Execute only when no open position and conviction is met
+                    if _auto_strat_confirm >= _AUTO_STRAT_CONFIRM_MIN and not em.positions:
                         _old_strat            = _strategy
                         _strategies           = [_best_key]
                         _strategy             = _best_key
@@ -1071,9 +1074,8 @@ async def main_loop():
                         _prev_indicators      = None   # reset EMA/MACD crossover state
                         _auto_strat_candidate = None
                         _auto_strat_confirm   = 0
+                        none_signal_streak    = 0      # fresh start on new strategy
                         # Predictor lifecycle: momentum needs PricePredictor; others don't.
-                        # Creating a fresh instance (is_trained=False) lets the existing
-                        # NN training block handle the actual fit on the next cycle.
                         if _strategy == "momentum" and predictor is None:
                             predictor = PricePredictor()
                         elif _strategy != "momentum":
@@ -1082,14 +1084,14 @@ async def main_loop():
                         _new_coin_mode = active_symbol if _strategy == "ema_cross" else "auto"
                         update_state(strategy=_strategy_label, strategy_key=_strategy,
                                      strategy_keys=_strategies, coin_mode=_new_coin_mode)
-                        push_log(f"[AUTO_STRAT] {_old_strat} → {_strategy} "
+                        push_log(f"[AUTO_STRAT] ✓ switched {_old_strat} → {_strategy} "
                                  f"(score {_curr_score:.1f} → {_best_score:.1f}): "
                                  f"{_advice['advised_strategy_reason']}")
                         log("AGENT", "AUTO_STRATEGY_SWITCH", from_=_old_strat, to=_strategy,
                             score_before=round(_curr_score, 1), score_after=round(_best_score, 1),
                             reason=_advice["advised_strategy_reason"][:100])
                 else:
-                    # No switch needed or margin not met — reset confirmation window
+                    # Current strategy is already optimal or margin too small — reset
                     _auto_strat_candidate = None
                     _auto_strat_confirm   = 0
 
