@@ -1,6 +1,44 @@
-# Raptor FleetEdge
+<div align="center">
 
-> 20-year veteran persona. Sizes aggressively on pristine setups, sits flat when the market is ambiguous. Capital preservation is the floor, not the goal.
+# 🦅 Raptor FleetEdge
+
+**A self-hosted, multi-agent crypto trading fleet for Binance Spot — five independent agents, live dashboards, one `docker compose up`.**
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/)
+[![Docker](https://img.shields.io/badge/docker-compose-2496ED.svg?logo=docker&logoColor=white)](docker-compose.yml)
+[![Exchange: Binance Spot](https://img.shields.io/badge/exchange-Binance%20Spot-F0B90B.svg)](https://www.binance.com/)
+[![Dependencies: 4](https://img.shields.io/badge/dependencies-4-brightgreen.svg)](requirements.txt)
+
+<!--
+  📸 Add a screenshot or GIF of the dashboards here — it's the single biggest thing
+  that makes visitors stay. Save it as docs/dashboard.gif (or .png) and uncomment:
+
+  <img src="docs/dashboard.gif" alt="Raptor FleetEdge fleet dashboard" width="900">
+-->
+
+*Sizes aggressively on pristine setups, sits flat when the market is ambiguous.<br>Capital preservation is the floor, not the goal.*
+
+</div>
+
+> [!WARNING]
+> **This software can trade real money.** It is not financial advice and comes with no guarantee of profit. Start in `testnet` or `demo` mode, read the [Go-Live Checklist](#go-live-checklist), and never risk more than you can afford to lose. See the full [Risk Disclaimer](#risk-disclaimer).
+
+## Why FleetEdge?
+
+Most open-source bots run one strategy on one coin. FleetEdge runs a **fleet**: a manager process supervises five independent agents, each with its own coin, strategy, risk state and live dashboard.
+
+- 🧭 **Regime-aware** — classifies every market as TRENDING, RANGING or VOLATILE and only takes entries that suit the regime
+- 🗳️ **Strategy consensus** — run up to 3 strategies per agent; secondaries can veto the primary's signal
+- 🪜 **Staircase exits** — 3-tier take-profit ladder with a stop that ratchets up as each target hits
+- 🩺 **Fee-aware coin picker** — scans every USDT pair and rejects coins that structurally can't beat trading fees
+- 🧠 **Lightweight ML gate** — a pure-NumPy neural net confirms entries, but only once its out-of-sample accuracy proves itself
+- 📊 **Live dashboards** — 1-second candles, indicator overlays, forecast bands, order log and a Strategy Advisor per agent
+- 🪶 **Small footprint** — ~10k lines of Python, 4 dependencies, no external TA library
+
+## Contents
+
+[Overview](#overview) · [Architecture](#architecture) · [Quick Start](#quick-start-docker-compose) · [Dashboards](#accessing-dashboards) · [Trading Modes](#trading-modes) · [Strategies](#strategies) · [Risk Engine](#risk-engine--halt-system) · [Go-Live Checklist](#go-live-checklist) · [Configuration](#key-configuration-parameters-configpy) · [Contributing](#contributing) · [License](#license)
 
 ---
 
@@ -745,3 +783,19 @@ This section documents all defects identified and resolved across three independ
 ## Risk Disclaimer
 
 This software trades real cryptocurrency. Past performance does not guarantee future results. Only use funds you can afford to lose entirely. The authors take no responsibility for financial losses.
+
+Nothing in this repository is financial, investment or trading advice. Cryptocurrency markets are highly volatile, and automated strategies can lose money quickly — including through bugs, exchange outages or API changes. You are solely responsible for how you configure and run this software and for complying with the laws and exchange terms that apply to you.
+
+---
+
+## Contributing
+
+Contributions are welcome — bug reports, new strategy modules, dashboard improvements and documentation alike. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and report security issues privately as described in [SECURITY.md](SECURITY.md).
+
+If FleetEdge is useful to you, a ⭐ on GitHub helps others find it.
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
